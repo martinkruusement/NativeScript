@@ -206,6 +206,24 @@ describe('collectDepsModuleExportInfo', () => {
 		expect(info.hasDefault).toBe(true);
 	});
 
+	it('follows minified export*from stars at line starts and after ; or }', () => {
+		write('min-star/a.js', `export const fromA = 1;\n`);
+		write('min-star/b.js', `export const fromB = 2;\n`);
+		write('min-star/c.js', `export const fromC = 3;\n`);
+		write('min-star/d.js', `export const fromD = 4;\n`);
+		const abs = write('min-star/index.js', `export*from"./a.js";function f(){}export*from'./b.js';export * from "./c.js";export const own=f;\n  export*from"./d.js"\n`);
+		const info = collectDepsModuleExportInfo(abs, 'ios');
+		expect(info.names).toEqual(['fromA', 'fromB', 'fromC', 'fromD', 'own']);
+		expect(info.hasDefault).toBe(false);
+	});
+
+	it('ignores export*from look-alikes in identifiers, strings and comments', () => {
+		write('star-lookalike/decoy.js', `export const decoy = 1;\n`);
+		const abs = write('star-lookalike/index.js', [`export const own = 1;`, `foo.reexport*from"./decoy.js";`, `foo.export * from './decoy.js';`, `const text = 'export*from"./decoy.js"';`, 'const tpl = `export * from "./decoy.js"`;', `// see a; export * from './decoy.js'`, `/* }export*from"./decoy.js" */`, `/*`, `export * from './decoy.js';`, `*/`].join('\n'));
+		const info = collectDepsModuleExportInfo(abs, 'ios');
+		expect(info.names).toEqual(['own']);
+	});
+
 	it('flags UMD factories with no static export names as opaque CJS', () => {
 		const abs = write('umd.js', `!function(e,t){"object"==typeof exports?module.exports=t():e.lib=t()}(this,function(){return {}});\n`);
 		const info = collectDepsModuleExportInfo(abs, 'ios');

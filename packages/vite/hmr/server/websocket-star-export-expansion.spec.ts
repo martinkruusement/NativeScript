@@ -148,6 +148,31 @@ describe('expandStarExports — transitive star re-export chains', () => {
 		expect(exportedList(out, '/ns/m/node_modules/pkg/index.js')).toContain('behindComment');
 	});
 
+	it('follows minified export*from stars in walked targets at line starts and after ; or }', async () => {
+		const importer = `export * from "/ns/m/node_modules/pkg/index.js";`;
+		const { server, transformer } = makeServer({
+			'/node_modules/pkg/index.js': `export*from"/node_modules/pkg/a.js";function f(){}export*from'/node_modules/pkg/b.js';export * from "/node_modules/pkg/c.js";export const own=f;\n  export*from"/node_modules/pkg/d.js"`,
+			'/node_modules/pkg/a.js': `export const fromA = 1;`,
+			'/node_modules/pkg/b.js': `export const fromB = 2;`,
+			'/node_modules/pkg/c.js': `export const fromC = 3;`,
+			'/node_modules/pkg/d.js': `export const fromD = 4;`,
+		});
+		const out = await expandStarExports(importer, server, '/', false, transformer);
+		expect(exportedList(out, '/ns/m/node_modules/pkg/index.js').sort()).toEqual(['fromA', 'fromB', 'fromC', 'fromD', 'own']);
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('ignores export*from look-alikes in identifiers, strings and comments of walked targets', async () => {
+		const importer = `export * from "/ns/m/node_modules/pkg/index.js";`;
+		const { server, transformer, calls } = makeServer({
+			'/node_modules/pkg/index.js': [`export const own = 1;`, `foo.reexport*from"/node_modules/pkg/decoy.js";`, `foo.export * from '/node_modules/pkg/decoy.js';`, `const text = 'export*from"/node_modules/pkg/decoy.js"';`, 'const tpl = `export * from "/node_modules/pkg/decoy.js"`;', `// see a; export * from '/node_modules/pkg/decoy.js'`, `/* }export*from"/node_modules/pkg/decoy.js" */`].join('\n'),
+			'/node_modules/pkg/decoy.js': `export const decoy = 1;`,
+		});
+		const out = await expandStarExports(importer, server, '/', false, transformer);
+		expect(exportedList(out, '/ns/m/node_modules/pkg/index.js')).toEqual(['own']);
+		expect(calls).not.toContain('/node_modules/pkg/decoy.js');
+	});
+
 	it('leaves the star untouched and warns when the target cannot be transformed', async () => {
 		const importer = `export * from "/ns/m/node_modules/pkg/missing.js";`;
 		const { server, transformer } = makeServer({});

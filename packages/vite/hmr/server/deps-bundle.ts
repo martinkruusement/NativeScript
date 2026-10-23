@@ -71,7 +71,7 @@ import { collectVendorModules } from '../shared/vendor/manifest-collect.js';
 import { generatePlatformPolyfills } from '../shared/runtime/platform-polyfills.js';
 import { getAngularLinkerFactory, runAngularLinker } from '../frameworks/angular/build/shared-linker.js';
 import { getBlockedDeviceNodeModulesReason, isFlavorClientPackageSpecifier, resolveCandidateFilePath } from './websocket-module-specifiers.js';
-import { extractDirectExportedNames, JS_IDENTIFIER_RE, parseExportSpecList } from './websocket-core-bridge.js';
+import { extractDirectExportedNames, JS_IDENTIFIER_RE, maskJsComments, parseExportSpecList } from './websocket-core-bridge.js';
 import { hasExistingDefaultExport } from './ns-core-cjs-shape.js';
 import { getCjsNamedExports } from '../helpers/cjs-named-exports.js';
 import { loadPersistedBootRecording } from './boot-recording.js';
@@ -947,8 +947,10 @@ export function collectDepsModuleExportInfo(absPath: string, platform: string, s
 			names.add(exportedName);
 		}
 	}
-	const starRe = /^[ \t]*export\s+\*\s+from\s+["']([^"']+)["']/gm;
-	while ((match = starRe.exec(code)) !== null) {
+	// Minified dists emit `export*from"./x";` without spaces, after `;` or `}`.
+	const starRe = /(?:^|[;}])[ \t]*export\s*\*\s*from\s*["']([^"']+)["']/gm;
+	const starScanCode = maskJsComments(code);
+	while ((match = starRe.exec(starScanCode)) !== null) {
 		const spec = match[1];
 		const target = spec.startsWith('.') ? resolveLocalReExportTarget(spec, absPath, platform) : resolveBareReExportTarget(spec, absPath, platform);
 		if (!target) return { names: null, hasDefault: false };

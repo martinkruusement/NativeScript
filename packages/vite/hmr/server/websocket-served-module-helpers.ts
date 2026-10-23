@@ -421,10 +421,8 @@ function scanModuleExportSurface(code: string): ModuleExportSurface {
 		}
 	}
 	const starSources: string[] = [];
-	// Tolerate trailing comments/code on the line (see the identical fix in
-	// websocket-core-bridge.ts: a strict `$` anchor silently skipped
-	// `export * from './layouts'; // barrel export` lines).
-	for (const m of code.matchAll(/^[ \t]*export\s+\*\s+from\s+["']([^"']+)["'][^\n]*$/gm)) {
+	// Minified dists emit `export*from"./x";` without spaces, after `;` or `}`.
+	for (const m of code.matchAll(/(?:^|[;}])[ \t]*export\s*\*\s*from\s*["']([^"']+)["']/gm)) {
 		starSources.push(m[1]);
 	}
 	return { ownNames, starSources };
