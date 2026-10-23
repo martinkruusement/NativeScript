@@ -114,12 +114,13 @@ export function keyframeAnimationsFromCSSProperty(value: any, animations: Keyfra
 	 */
 	const MULTIPLE_SPLIT_RE = /,(?![^(]*\))/;
 
-	const isTime = (v: string) => !!v.match(/\dm?s$/g);
-	const isTimingFunction = (v: string) => !!v.match(/ease|linear|ease-in|ease-out|ease-in-out|spring|cubic-bezier/g);
-	const isIterationCount = (v: string) => !!v.match(/infinite|[\d.]+$/g);
-	const isDirection = (v: string) => !!v.match(/normal|reverse|alternate|alternate-reverse/g);
-	const isFillMode = (v: string) => !!v.match(/none|forwards|backwards|both/g);
-	const isPlayState = (v: string) => !!v.match(/running|paused/g);
+	// anchored to whole tokens; cubic-bezier() is validated by the converter
+	const isTime = (v: string) => /^[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?m?s$/.test(v);
+	const isTimingFunction = (v: string) => /^(?:ease|linear|ease-in|ease-out|ease-in-out|spring)$|^cubic-bezier\(/.test(v);
+	const isIterationCount = (v: string) => /^(?:infinite|[+-]?\d*\.?\d+(?:[eE][+-]?\d+)?)$/.test(v);
+	const isDirection = (v: string) => /^(?:normal|reverse|alternate|alternate-reverse)$/.test(v);
+	const isFillMode = (v: string) => /^(?:none|forwards|backwards|both)$/.test(v);
+	const isPlayState = (v: string) => /^(?:running|paused)$/.test(v);
 
 	const values = value.split(MULTIPLE_SPLIT_RE);
 	for (const parsedValue of values) {

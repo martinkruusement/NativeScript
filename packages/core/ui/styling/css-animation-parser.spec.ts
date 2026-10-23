@@ -12,6 +12,8 @@ function getCurves() {
 		'ease-in-out': CoreTypes.AnimationCurve.easeInOut,
 		spring: CoreTypes.AnimationCurve.spring,
 		'cubic-bezier(0.1, 1.0, 0.5, 0.5)': CoreTypes.AnimationCurve.cubicBezier(0.1, 1.0, 0.5, 0.5),
+		'cubic-bezier(0.1,0.7,1,0.1)': CoreTypes.AnimationCurve.cubicBezier(0.1, 0.7, 1, 0.1),
+		'cubic-bezier( 0.25, 0.1, 0.25, 1 )': CoreTypes.AnimationCurve.cubicBezier(0.25, 0.1, 0.25, 1),
 		'cubic-bezier(0.42, 0.0, 1.0, 1.0);': CoreTypes.AnimationCurve.cubicBezier(0.42, 0.0, 1.0, 1.0),
 	};
 }
@@ -71,6 +73,27 @@ describe('css-animation-parser', () => {
 			});
 		});
 
+		it('parses duration and delay in every number form', () => {
+			const timeForms = { ...times, '.5s': 500, '+1s': 1000, '1e3ms': 1000, '1E3ms': 1000, '2.5e-1s': 250 };
+
+			Object.entries(timeForms).forEach(([timeString, ms]) => {
+				const animation = testSingleAnimation(`${timeString} ${timeString} fade`);
+				expect(animation.duration).toBe(ms);
+				expect(animation.delay).toBe(ms);
+				expect(animation.name).toBe('fade');
+			});
+		});
+
+		it('parses negative delay', () => {
+			['-1s', '-0.5s', '-.5s', '-500ms'].forEach((delay) => {
+				const animation = testSingleAnimation(`1s ${delay} fade`);
+				expect(animation.duration).toBe(1000);
+				// timeConverter clamps negative values to zero
+				expect(animation.delay).toBe(0);
+				expect(animation.name).toBe('fade');
+			});
+		});
+
 		it('parses curve', () => {
 			const curves = getCurves();
 			Object.entries(curves).forEach(([curveString, curve]) => {
@@ -108,6 +131,10 @@ describe('css-animation-parser', () => {
 			expect(testSingleAnimation(`ease 2`).iterations).toBe(2);
 			expect(testSingleAnimation(`ease 2.5`).iterations).toBe(2.5);
 			expect(testSingleAnimation(`ease infinite`).iterations).toBe(Infinity);
+			expect(testSingleAnimation(`1s 0`).iterations).toBe(0);
+			expect(testSingleAnimation(`1s .5`).iterations).toBe(0.5);
+			expect(testSingleAnimation(`1s +2`).iterations).toBe(2);
+			expect(testSingleAnimation(`1s 1e1`).iterations).toBe(10);
 		});
 
 		it('parses direction', () => {
@@ -169,6 +196,96 @@ describe('css-animation-parser', () => {
 			expect(testSingleAnimation(`1s fade_in`).name).toBe('fade_in');
 			expect(testSingleAnimation(`1s 'fade_in'`).name).toBe('fade_in');
 			expect(testSingleAnimation(`1s "fade_in"`).name).toBe('fade_in');
+		});
+
+		it('consumes every keyword placed before the name', () => {
+			const keywords: [string, keyof KeyframeAnimationInfo, unknown][] = [
+				['ease', 'curve', CoreTypes.AnimationCurve.ease],
+				['linear', 'curve', CoreTypes.AnimationCurve.linear],
+				['ease-in', 'curve', CoreTypes.AnimationCurve.easeIn],
+				['ease-out', 'curve', CoreTypes.AnimationCurve.easeOut],
+				['ease-in-out', 'curve', CoreTypes.AnimationCurve.easeInOut],
+				['spring', 'curve', CoreTypes.AnimationCurve.spring],
+				['cubic-bezier(0.1, 0.7, 1, 0.1)', 'curve', CoreTypes.AnimationCurve.cubicBezier(0.1, 0.7, 1, 0.1)],
+				['infinite', 'iterations', Infinity],
+				['2', 'iterations', 2],
+				['normal', 'isReverse', false],
+				['reverse', 'isReverse', true],
+				['alternate', 'isReverse', false],
+				['alternate-reverse', 'isReverse', false],
+				['none', 'isForwards', false],
+				['forwards', 'isForwards', true],
+				['backwards', 'isForwards', false],
+				['both', 'isForwards', true],
+				// play-state is not implemented, so only the name shows that it was consumed
+				['running', 'name', 'fade'],
+				['paused', 'name', 'fade'],
+			];
+
+			keywords.forEach(([keyword, field, value]) => {
+				const animation = testSingleAnimation(`1s ${keyword} fade`);
+				expect(animation.name).toBe('fade');
+				expect(animation.duration).toBe(1000);
+				expect(animation[field]).toEqual(value);
+			});
+		});
+
+		it('parses animation names that contain a keyword or end in a digit', () => {
+			const names = ['spin-7ba5bd90', 'pulse2', 'flash-2s', 'flash-250ms', 'release-banner', 'linear-fade', 'springy', 'cubic-bezier-wave', 'infinite-spin', 'abnormal', 'reverse-fade', 'alternate-glow', 'nonexistent', 'forwards-slide', 'backwards-slide', 'both-ways', 'running-man', 'paused-glow'];
+
+			names.forEach((name) => {
+				const nameOnly = testSingleAnimation(`${name} 1s`);
+				expect(nameOnly.name).toBe(name);
+				expect(nameOnly.duration).toBe(1000);
+				expect(nameOnly.delay).toBe(0);
+				expect(nameOnly.curve).toBe(CoreTypes.AnimationCurve.ease);
+				expect(nameOnly.iterations).toBe(1);
+				expect(nameOnly.isReverse).toBe(false);
+				expect(nameOnly.isForwards).toBe(false);
+
+				[`${name} 2s ease-in 1s 3 reverse forwards paused`, `2s ease-in 1s 3 reverse forwards paused ${name}`].forEach((css) => {
+					const animation = testSingleAnimation(css);
+					expect(animation.name).toBe(name);
+					expect(animation.duration).toBe(2000);
+					expect(animation.delay).toBe(1000);
+					expect(animation.curve).toBe(CoreTypes.AnimationCurve.easeIn);
+					expect(animation.iterations).toBe(3);
+					expect(animation.isReverse).toBe(true);
+					expect(animation.isForwards).toBe(true);
+				});
+
+				expect(testSingleAnimation(`1s '${name}'`).name).toBe(name);
+				expect(testSingleAnimation(`1s "${name}"`).name).toBe(name);
+			});
+		});
+
+		it('parses every field next to a plain or digit-terminated name', () => {
+			['spin', 'spin-7ba5bd90'].forEach((name) => {
+				const animation = testSingleAnimation(`${name} 1s cubic-bezier(0.1, 0.7, 1, 0.1) 500ms 2 alternate both paused`);
+				expect(animation.name).toBe(name);
+				expect(animation.duration).toBe(1000);
+				expect(animation.curve).toEqual(CoreTypes.AnimationCurve.cubicBezier(0.1, 0.7, 1, 0.1));
+				expect(animation.delay).toBe(500);
+				expect(animation.iterations).toBe(2);
+				expect(animation.isReverse).toBe(false);
+				expect(animation.isForwards).toBe(true);
+			});
+		});
+
+		it('parses multiple animations whose names end in a digit', () => {
+			const animations = testMultipleAnimations(`spin-7ba5bd90 1s cubic-bezier(0.1, 0.7, 1, 0.1) infinite, pulse2 2s ease-out 3`);
+			expect(animations.length).toBe(2);
+
+			const [animation1, animation2] = animations;
+			expect(animation1.name).toBe('spin-7ba5bd90');
+			expect(animation1.duration).toBe(1000);
+			expect(animation1.curve).toEqual(CoreTypes.AnimationCurve.cubicBezier(0.1, 0.7, 1, 0.1));
+			expect(animation1.iterations).toBe(Infinity);
+
+			expect(animation2.name).toBe('pulse2');
+			expect(animation2.duration).toBe(2000);
+			expect(animation2.curve).toBe(CoreTypes.AnimationCurve.easeOut);
+			expect(animation2.iterations).toBe(3);
 		});
 
 		it('parses MDN example: 3s ease-in 1s 2 reverse both paused slidein', () => {

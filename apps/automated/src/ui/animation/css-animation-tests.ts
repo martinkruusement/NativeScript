@@ -64,6 +64,28 @@ export function test_ReadTheAnimationProperty() {
 	TKUnit.assertEqual(animation.iterations, 2);
 }
 
+export function test_ReadTheAnimationPropertyWithKeywordOrDigitInName() {
+	let animation = createAnimationFromCSS(
+		`.test {
+			animation: spin-7ba5bd90 1s linear infinite;
+		}`,
+		'test',
+	);
+	TKUnit.assertEqual(animation.name, 'spin-7ba5bd90');
+	TKUnit.assertEqual(animation.duration, 1000);
+	TKUnit.assertEqual(animation.curve, CoreTypes.AnimationCurve.linear);
+	TKUnit.assertEqual(animation.iterations, Number.POSITIVE_INFINITY);
+	animation = createAnimationFromCSS(
+		`.test {
+			animation: release-banner 1s;
+		}`,
+		'test',
+	);
+	TKUnit.assertNotNull(animation, 'The stylesheet should not be dropped.');
+	TKUnit.assertEqual(animation.name, 'release-banner');
+	TKUnit.assertEqual(animation.duration, 1000);
+}
+
 export function test_ReadAnimationCurve() {
 	let animation = createAnimationFromCSS(
 		`.test {
