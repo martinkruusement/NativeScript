@@ -79,6 +79,9 @@ declare global {
 	var __NS_REGISTER_CSS__: ((tag: string, cssText: string) => void) | undefined;
 	// - (keyed by tag) until it's installed, then drained.
 	var __NS_PENDING_CSS__: Record<string, string> | null | undefined;
+	// Component css by tag in first-registration order, shared by both appliers.
+	var __NS_CSS_TAG_ORDER__: Map<string, string> | undefined;
+	var __NS_CSS_REAPPLY_AFTER__: ((tag: string | null) => number) | undefined;
 
 	// ── Function hooks (typed where the signature is stable; `any` otherwise) ──
 	var __NS_HMR_IMPORT__: ((url: string) => Promise<unknown>) | undefined;

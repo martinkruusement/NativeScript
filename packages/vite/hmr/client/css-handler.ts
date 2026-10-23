@@ -66,10 +66,15 @@ export function applyCssText(cssText: string, tag: string = APP_CSS_TAG): void {
 		const Application = getCore('Application');
 		let appliedTagged = false;
 		if (taggedCss.add && taggedCss.remove) {
+			// Unchanged component css is already in place.
+			if (tag !== APP_CSS_TAG && getGlobalScope().__NS_CSS_TAG_ORDER__?.get(tag) === cssText) {
+				return;
+			}
 			try {
 				taggedCss.remove(tag);
 				taggedCss.add(cssText, tag);
 				appliedTagged = true;
+				keepCascadeOrder(tag, cssText, taggedCss);
 				if (VERBOSE) console.info(`[ns-hmr] CSS applied via tagged replace (tag=${tag})`);
 			} catch (taggedError: any) {
 				console.warn('[ns-hmr] tagged CSS replace failed, falling back to addCss:', taggedError?.message || String(taggedError));
@@ -87,6 +92,35 @@ export function applyCssText(cssText: string, tag: string = APP_CSS_TAG): void {
 		} catch {}
 	} catch (e) {
 		console.warn('[ns-hmr] CSS apply failed:', e?.message || String(e));
+	}
+}
+
+// Core re-adds a tag last, so re-add the tags registered after it.
+function keepCascadeOrder(tag: string, cssText: string, taggedCss: TaggedCssApi): void {
+	const g = getGlobalScope();
+	const tagOrder: Map<string, string> = g.__NS_CSS_TAG_ORDER__ || (g.__NS_CSS_TAG_ORDER__ = new Map());
+	let anchor: string | null = null;
+	if (tag !== APP_CSS_TAG) {
+		const known = tagOrder.has(tag);
+		tagOrder.set(tag, cssText);
+		if (!known) return;
+		anchor = tag;
+	}
+	// Prefer the entry runtime's re-add, bound to its core realm.
+	const reapplyShared = g.__NS_CSS_REAPPLY_AFTER__;
+	if (typeof reapplyShared === 'function') {
+		reapplyShared(anchor);
+		return;
+	}
+	let after = anchor === null;
+	for (const [otherTag, otherCss] of tagOrder) {
+		if (after) {
+			try {
+				taggedCss.remove(otherTag);
+				taggedCss.add(otherCss, otherTag);
+			} catch {}
+		}
+		if (otherTag === anchor) after = true;
 	}
 }
 
@@ -131,6 +165,10 @@ export async function handleCssUpdates(cssUpdates: any[], httpOrigin: string): P
 				// own path so they replace independently of the global stylesheet.
 				const tag = typeof update.tag === 'string' && update.tag ? update.tag : undefined;
 				applyCssText(cssText, tag);
+				// App code that imports app.css registered a copy under its path.
+				if (!tag && getGlobalScope().__NS_CSS_TAG_ORDER__?.has(cssPath)) {
+					applyCssText(cssText, cssPath);
+				}
 			}
 		} catch (e) {
 			console.warn('[ns-hmr] CSS update fetch/apply failed:', e?.message || String(e));

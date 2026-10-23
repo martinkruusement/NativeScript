@@ -166,6 +166,32 @@ export function installHttpCoreCssSupport(coreModule: any, verbose?: boolean): H
 		// rules disappear (the additive `Application.addCss` cannot
 		// undo previously installed selectors).
 		const taggedCss = resolveTaggedCssApi(coreModule);
+
+		// Core re-adds a tag last, and later rules win equal-specificity ties.
+		const tagOrder: Map<string, string> = g.__NS_CSS_TAG_ORDER__ || (g.__NS_CSS_TAG_ORDER__ = new Map());
+		const reapplyTagsAfter = (tag: string | null): number => {
+			if (!(taggedCss.add && taggedCss.remove)) {
+				return 0;
+			}
+			let after = tag === null;
+			let count = 0;
+			for (const [otherTag, otherCss] of tagOrder) {
+				if (after) {
+					try {
+						taggedCss.remove(otherTag);
+						taggedCss.add(otherCss, otherTag);
+						count++;
+					} catch {}
+				}
+				if (otherTag === tag) {
+					after = true;
+				}
+			}
+			if (verbose && count) console.info(`[ns-entry] re-registered ${count} stylesheet(s) after ${tag ?? APP_CSS_TAG} to keep cascade order`);
+			return count;
+		};
+		g.__NS_CSS_REAPPLY_AFTER__ = reapplyTagsAfter;
+
 		const applyCss: HmrCssApplier = (cssText: string, refreshRoot = true) => {
 			if (typeof cssText !== 'string' || !cssText.length) {
 				return;
@@ -181,7 +207,9 @@ export function installHttpCoreCssSupport(coreModule: any, verbose?: boolean): H
 					if (verbose) console.warn('[ns-entry] tagged CSS replace failed, falling back to addCss:', taggedError?.message || taggedError);
 				}
 			}
-			if (!appliedTagged) {
+			if (appliedTagged) {
+				reapplyTagsAfter(null);
+			} else {
 				Application.addCss(cssText);
 			}
 			if (!refreshRoot) {
@@ -200,8 +228,17 @@ export function installHttpCoreCssSupport(coreModule: any, verbose?: boolean): H
 			}
 			try {
 				if (taggedCss.add && taggedCss.remove) {
+					const known = tagOrder.has(tag);
+					// Unchanged css, e.g. an SFC re-assembled for a script-only edit.
+					if (known && tagOrder.get(tag) === cssText) {
+						return;
+					}
 					taggedCss.remove(tag);
 					taggedCss.add(cssText, tag);
+					tagOrder.set(tag, cssText);
+					if (known) {
+						reapplyTagsAfter(tag);
+					}
 				} else if (Application.addCss) {
 					Application.addCss(cssText);
 				}
@@ -245,6 +282,8 @@ export function installHttpCoreCssSupport(coreModule: any, verbose?: boolean): H
 					taggedCss.remove(APP_CSS_TAG);
 					taggedCss.add(appCssAst, APP_CSS_TAG);
 					cssApplied = true;
+					// Tags registered before app.css must still follow it.
+					reapplyTagsAfter(null);
 					if (verbose) console.info('[ns-entry] app.css applied in HTTP core realm via AST');
 				} catch (astError: any) {
 					if (verbose) console.warn('[ns-entry] AST CSS apply failed, falling back to raw text:', astError?.message || astError);
