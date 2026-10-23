@@ -306,6 +306,40 @@ function createFixtureProject(): string {
 	write('node_modules/pkg-j/package.json', JSON.stringify({ name: 'pkg-j', version: '1.0.0', main: 'dist/index.js' }));
 	write('node_modules/pkg-j/index.ts', `export * from './src/not-shipped';\n`);
 	write('node_modules/pkg-j/dist/index.js', `export const J = 'j-dist';\n`);
+	// Package whose exports map points extensionless subpaths into `dist/esm`
+	// while shipping types-only stubs at the subpath locations.
+	write('node_modules/pkg-k/package.json', JSON.stringify({ name: 'pkg-k', version: '1.0.0', exports: { '.': './dist/esm/index.js', './widget': { types: './dist/types/widget/index.d.ts', import: './dist/esm/widget/index.js' }, './plugins/*': './dist/esm/plugins/*/index.js', './impl': './dist/esm/impl.js', './gone': './dist/esm/gone.js', './legacy.js': './dist/esm/legacy.js', './compat': [{ require: './compat.cjs' }, './compat.cjs'], './private/*': null } }));
+	write('node_modules/pkg-k/dist/esm/index.js', `export const K = 'k';\n`);
+	write('node_modules/pkg-k/widget/index.ts', `export * from '../dist/types/widget/index';\n`);
+	write('node_modules/pkg-k/dist/types/widget/index.d.ts', `export declare const Widget: string;\n`);
+	write('node_modules/pkg-k/dist/esm/widget/index.js', `export const Widget = 'k-widget';\n`);
+	write('node_modules/pkg-k/plugins/camera/index.ts', `export * from '../../dist/types/plugins/camera/index';\n`);
+	write('node_modules/pkg-k/dist/esm/plugins/camera/index.js', `export const Camera = 'k-camera';\n`);
+	write('node_modules/pkg-k/dist/esm/impl.ios.js', `export const KImpl = 'ios';\n`);
+	write('node_modules/pkg-k/dist/esm/impl.android.js', `export const KImpl = 'android';\n`);
+	write('node_modules/pkg-k/gone.js', `export const Gone = 'k-gone';\n`);
+	write('node_modules/pkg-k/internal/util.js', `export const util = 'k-util';\n`);
+	write('node_modules/pkg-k/legacy.js', `export const legacy = 'k-root';\n`);
+	write('node_modules/pkg-k/dist/esm/legacy.js', `export const legacy = 'k-dist';\n`);
+	write('node_modules/pkg-k/compat', `module.exports = require('./compat.cjs');\n`);
+	write('node_modules/pkg-k/compat.cjs', `exports.compat = 'k-compat';\n`);
+	write('node_modules/pkg-k/private/secret.js', `export const secret = 'k-secret';\n`);
+	// The same packages installed in an app (older copies without a usable exports
+	// entry for the subpath) and hoisted to the workspace root (newer copies that declare it).
+	write('apps/mobile/node_modules/pkg-l/package.json', JSON.stringify({ name: 'pkg-l', version: '1.0.0', main: 'index.js' }));
+	write('apps/mobile/node_modules/pkg-l/index.js', `export const L = 'l-1';\n`);
+	write('apps/mobile/node_modules/pkg-l/operators/index.js', `export const op = 'l-1-op';\n`);
+	write('node_modules/pkg-l/package.json', JSON.stringify({ name: 'pkg-l', version: '2.0.0', exports: { '.': './dist/index.js', './operators': './dist/operators/index.js' } }));
+	write('node_modules/pkg-l/dist/index.js', `export const L = 'l-2';\n`);
+	write('node_modules/pkg-l/dist/operators/index.js', `export const op = 'l-2-op';\n`);
+	write('apps/mobile/node_modules/pkg-m/package.json', JSON.stringify({ name: 'pkg-m', version: '1.0.0', exports: { '.': './index.js', './gone': './lib/gone.js' } }));
+	write('apps/mobile/node_modules/pkg-m/index.js', `export const M = 'm-1';\n`);
+	write('apps/mobile/node_modules/pkg-m/sub.js', `export const sub = 'm-1-sub';\n`);
+	write('apps/mobile/node_modules/pkg-m/gone.js', `export const gone = 'm-1-gone';\n`);
+	write('node_modules/pkg-m/package.json', JSON.stringify({ name: 'pkg-m', version: '2.0.0', exports: { '.': './dist/index.js', './sub': './dist/sub.js', './gone': './dist/gone.js' } }));
+	write('node_modules/pkg-m/dist/index.js', `export const M = 'm-2';\n`);
+	write('node_modules/pkg-m/dist/sub.js', `export const sub = 'm-2-sub';\n`);
+	write('node_modules/pkg-m/dist/gone.js', `export const gone = 'm-2-gone';\n`);
 	// Dep code reading app-level `__FOO__` defines (Vue feature-flag shape).
 	write('node_modules/pkg-flags/package.json', JSON.stringify({ name: 'pkg-flags', version: '1.0.0', module: 'index.js' }));
 	write('node_modules/pkg-flags/index.js', `export const optionsApi = typeof __VUE_OPTIONS_API__ === 'boolean' ? __VUE_OPTIONS_API__ : 'unset';\nexport const bad = typeof __BAD_DEFINE__ === 'undefined' ? 'unset' : __BAD_DEFINE__;\n`);
@@ -354,6 +388,42 @@ describe('resolveDepsEntriesFromRecording', () => {
 	it('prefers the declared package entry over a stray root index source (solid-navigation shape)', () => {
 		const entries = resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-j'], projectRoot, null, 'ios');
 		expect(entries.map((e) => e.key)).toEqual(['node_modules/pkg-j/dist/index.js']);
+	});
+
+	it('prefers the exports entry of an extensionless subpath over a types-only stub at its location (exact and pattern keys)', () => {
+		const entries = resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-k/widget', '/ns/m/node_modules/pkg-k/plugins/camera'], projectRoot, null, 'ios');
+		expect(entries.map((e) => e.key)).toEqual(['node_modules/pkg-k/dist/esm/widget/index.js', 'node_modules/pkg-k/dist/esm/plugins/camera/index.js']);
+	});
+
+	it('resolves platform-suffixed files behind an exports entry per platform', () => {
+		expect(resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-k/impl'], projectRoot, null, 'ios').map((e) => e.key)).toEqual(['node_modules/pkg-k/dist/esm/impl.ios.js']);
+		expect(resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-k/impl'], projectRoot, null, 'android').map((e) => e.key)).toEqual(['node_modules/pkg-k/dist/esm/impl.android.js']);
+	});
+
+	it('reads the exports map of a package hoisted to the workspace root', () => {
+		const entries = resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-k/widget'], path.join(projectRoot, 'apps', 'mobile'), projectRoot, 'ios');
+		expect(entries.map((e) => e.absPath)).toEqual([path.join(projectRoot, 'node_modules/pkg-k/dist/esm/widget/index.js')]);
+	});
+
+	it('keeps the app-local copy of a package when only the hoisted copy declares the subpath', () => {
+		const appRoot = path.join(projectRoot, 'apps', 'mobile');
+		const entries = resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-l/operators', '/ns/m/node_modules/pkg-l', '/ns/m/node_modules/pkg-m/sub', '/ns/m/node_modules/pkg-m/gone'], appRoot, projectRoot, 'ios');
+		expect(entries.map((e) => e.absPath)).toEqual([path.join(appRoot, 'node_modules/pkg-l/operators/index.js'), path.join(appRoot, 'node_modules/pkg-l/index.js'), path.join(appRoot, 'node_modules/pkg-m/sub.js'), path.join(appRoot, 'node_modules/pkg-m/gone.js')]);
+	});
+
+	it('keeps the on-disk lookup for subpaths the exports map does not declare or whose declared target is missing', () => {
+		const entries = resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-k/internal/util', '/ns/m/node_modules/pkg-k/gone'], projectRoot, null, 'ios');
+		expect(entries.map((e) => e.key)).toEqual(['node_modules/pkg-k/internal/util.js', 'node_modules/pkg-k/gone.js']);
+	});
+
+	it('keeps the on-disk lookup for exports values without a usable target (fallback arrays, null)', () => {
+		const entries = resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-k/compat', '/ns/m/node_modules/pkg-k/private/secret'], projectRoot, null, 'ios');
+		expect(entries.map((e) => e.key)).toEqual(['node_modules/pkg-k/compat.cjs', 'node_modules/pkg-k/private/secret.js']);
+	});
+
+	it('resolves a spec with a file extension as written, even when the exports map remaps that key', () => {
+		const entries = resolveDepsEntriesFromRecording(['/ns/m/node_modules/pkg-k/legacy.js'], projectRoot, null, 'ios');
+		expect(entries.map((e) => e.key)).toEqual(['node_modules/pkg-k/legacy.js']);
 	});
 });
 
@@ -601,6 +671,12 @@ describe('createDepsBundleService', () => {
 		const cjsShim = service.getShimForSpec('/node_modules/pkg-e/index.js');
 		expect(cjsShim).toContain('export const eOne = ');
 		expect(cjsShim).toContain('export const eTwo = ');
+	});
+
+	it('serves the shim of a bundled exports entry for its extensionless subpath spec', async () => {
+		const service = makeService(['/ns/m/node_modules/pkg-k/dist/esm/widget/index.js']);
+		await service.ensureBuilt();
+		expect(service.getShimForSpec('/node_modules/pkg-k/widget')).toContain('export const Widget = ');
 	});
 
 	it('serves a shim for bundled opaque CJS (no static export names), with the names it has when loaded', async () => {

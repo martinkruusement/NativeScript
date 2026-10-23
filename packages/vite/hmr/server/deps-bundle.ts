@@ -194,7 +194,7 @@ function resolvePackageRootEntry(spec: string, roots: readonly string[], platfor
 	return null;
 }
 
-function resolvePackageSubpathEntry(pkgDir: string, subpath: string, platform: string): string | null {
+function collectPackageSubpathExportsTargets(pkgDir: string, subpath: string): string[] {
 	const candidates: string[] = [];
 	try {
 		const pkg = JSON.parse(readFileSync(path.join(pkgDir, 'package.json'), 'utf-8'));
@@ -217,8 +217,28 @@ function resolvePackageSubpathEntry(pkgDir: string, subpath: string, platform: s
 	} catch {
 		// Unreadable manifest: fall through to the on-disk lookup.
 	}
+	return candidates;
+}
+
+function resolvePackageSubpathEntry(pkgDir: string, subpath: string, platform: string): string | null {
+	const candidates = collectPackageSubpathExportsTargets(pkgDir, subpath);
 	candidates.push(subpath);
 	return resolvePackageFileCandidates(pkgDir, candidates, platform);
+}
+
+function resolvePackageSubpathExportsEntry(spec: string, roots: readonly string[], platform: string): string | null {
+	const pkgSub = spec.replace(/^\/node_modules\//, '');
+	if (!pkgSub || pkgSub === spec || pkgSub.includes('/node_modules/')) return null;
+	const parts = pkgSub.split('/');
+	const nameSegments = pkgSub.startsWith('@') ? 2 : 1;
+	if (parts.length <= nameSegments) return null;
+	const subpath = parts.slice(nameSegments).join('/');
+	for (const root of roots) {
+		const pkgDir = path.join(root, 'node_modules', ...parts.slice(0, nameSegments));
+		// The nearest installed copy decides; a hoisted copy never shadows it.
+		if (existsSync(pkgDir)) return resolvePackageFileCandidates(pkgDir, collectPackageSubpathExportsTargets(pkgDir, subpath), platform);
+	}
+	return null;
 }
 
 /** `/node_modules/<pkg>` or `/node_modules/@scope/<pkg>` with no subpath. */
@@ -237,6 +257,11 @@ function resolveSpecToFile(spec: string, projectRoot: string, workspaceRoot: str
 	// (solid-navigation shape), minting a broken or second realm.
 	if (isPackageRootSpec(spec)) {
 		const entry = resolvePackageRootEntry(spec, roots, platform);
+		if (entry) return entry;
+	}
+	// Declared exports targets win over shipped sources and stubs at the subpath.
+	if (!SCRIPT_EXT_RE.test(spec)) {
+		const entry = resolvePackageSubpathExportsEntry(spec, roots, platform);
 		if (entry) return entry;
 	}
 	for (const candidate of buildDepsCandidateSpecs(spec, platform)) {
