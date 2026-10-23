@@ -147,6 +147,30 @@ describe('runHotUpdatePrologue', () => {
 		expect(sentTypes).not.toContain('ns:css-updates');
 	});
 
+	it('asks the strategy about the edited stylesheet and still emits the update summary when it claims it', async () => {
+		const openClient: FakeClient = { readyState: 1, send: vi.fn() };
+		const wss = { clients: new Set<FakeClient>([openClient]) } as any;
+		const ownsComponentStyleHmr = vi.fn((_server: unknown, file: string) => file.endsWith('/theme.css'));
+		const strategy = { flavor: 'vue', ownsComponentStyleHmr } as any;
+		const deps = makeDeps({ wss, strategy, getHmrSourceRootsCached: () => ['/proj/src'] });
+		const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+		try {
+			const claimed = makeCtx('/proj/src/styles/theme.css');
+			expect(await runHotUpdatePrologue(claimed, deps)).toBeNull();
+			expect(ownsComponentStyleHmr).toHaveBeenCalledWith(claimed.server, '/proj/src/styles/theme.css');
+			expect(info.mock.calls.some((c) => String(c[0]).includes('/src/styles/theme.css'))).toBe(true);
+			expect(openClient.send.mock.calls.map((c) => JSON.parse(String(c[0])).type)).not.toContain('ns:css-updates');
+
+			const other = makeCtx('/proj/src/styles/other.css');
+			expect(await runHotUpdatePrologue(other, deps)).toBeNull();
+			expect(ownsComponentStyleHmr).toHaveBeenLastCalledWith(other.server, '/proj/src/styles/other.css');
+			const cssMsg = openClient.send.mock.calls.map((c) => JSON.parse(String(c[0]))).find((m) => m.type === 'ns:css-updates');
+			expect(cssMsg.updates[0]).toMatchObject({ path: '/src/styles/other.css', tag: '/src/styles/other.css' });
+		} finally {
+			info.mockRestore();
+		}
+	});
+
 	it('still broadcasts the GLOBAL app entry CSS even when the framework owns component-style HMR', async () => {
 		const openClient: FakeClient = { readyState: 1, send: vi.fn() };
 		const wss = { clients: new Set<FakeClient>([openClient]) } as any;

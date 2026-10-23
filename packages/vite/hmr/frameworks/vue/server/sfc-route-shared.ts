@@ -109,6 +109,34 @@ function devRequestPath(projectRoot: string, file: string): string {
 	return '/@fs/' + file.split(path.sep).join('/').replace(/^\/+/, '');
 }
 
+// Stylesheet file → root-relative paths of SFCs whose styles depend on it.
+const styleDependencyIndex = new Map<string, Set<string>>();
+
+function styleDependencyKey(file: string): string {
+	return path.resolve(file).replace(/\\/g, '/');
+}
+
+function indexStyleDependency(file: string, base: string): void {
+	const key = styleDependencyKey(file);
+	let bases = styleDependencyIndex.get(key);
+	if (!bases) {
+		bases = new Set();
+		styleDependencyIndex.set(key, bases);
+	}
+	bases.add(base);
+}
+
+// The files Vite's css pipeline read for a style sub-request (`@import`, `@use`).
+async function indexViteStyleDependencies(server: ViteDevServer, url: string, base: string): Promise<void> {
+	try {
+		const graph = server.environments?.client?.moduleGraph ?? server.moduleGraph;
+		const mod = await graph?.getModuleByUrl(url);
+		for (const dep of mod?.importedModules ?? []) {
+			if (dep.file) indexStyleDependency(dep.file, base);
+		}
+	} catch {}
+}
+
 /**
  * Whether @vitejs/plugin-vue compiles in production mode (its `isProduction`).
  * @param server The dev server, whose resolved config plugin-vue reads.
@@ -142,7 +170,7 @@ export function resolveSfcDescriptorId(opts: { server?: ViteDevServer; abs: stri
 		.slice(0, 8);
 }
 
-async function compileStyleBlockDirect(opts: { block: SFCStyleBlock; source: string; filename: string; projectRoot: string; scopeId: string; isProd: boolean; modulesOptions: unknown; verbose: boolean }): Promise<{ css: string; modules: Record<string, string> | null; failed: boolean }> {
+async function compileStyleBlockDirect(opts: { block: SFCStyleBlock; source: string; filename: string; projectRoot: string; scopeId: string; isProd: boolean; modulesOptions: unknown; verbose: boolean }): Promise<{ css: string; modules: Record<string, string> | null; failed: boolean; dependencies: string[] }> {
 	const { block, filename, verbose } = opts;
 	const lang = (block.lang || '').toLowerCase();
 	const projectRequire = getProjectRequire(opts.projectRoot);
@@ -163,7 +191,7 @@ async function compileStyleBlockDirect(opts: { block: SFCStyleBlock; source: str
 			res.errors.map((e: any) => e?.message || String(e)),
 		);
 	}
-	return { css: res?.code || '', modules: res?.modules || null, failed: !!res?.errors?.length };
+	return { css: res?.code || '', modules: res?.modules || null, failed: !!res?.errors?.length, dependencies: Array.from(res?.dependencies ?? []) };
 }
 
 /**
@@ -222,6 +250,7 @@ export async function compileSfcStyles(opts: CompileSfcStylesOptions): Promise<S
 		const srcAbs = block.src ? await resolveStyleSrc(server, block.src, abs) : null;
 		let source = block.content;
 		if (srcAbs) {
+			indexStyleDependency(srcAbs, base);
 			try {
 				source = readFileSync(srcAbs, 'utf-8');
 			} catch (e: any) {
@@ -243,13 +272,17 @@ export async function compileSfcStyles(opts: CompileSfcStylesOptions): Promise<S
 			} catch (e: any) {
 				if (verbose) console.warn('[sfc-asm][style] vite pipeline failed, compiling directly', url, e?.message || String(e));
 			}
-			if (css !== null) css = restoreAppRootUrls(css, devServerUrlPrefix(server, opts.appVirtualWithSlash));
+			if (css !== null) {
+				css = restoreAppRootUrls(css, devServerUrlPrefix(server, opts.appVirtualWithSlash));
+				await indexViteStyleDependencies(server, url, base);
+			}
 		}
 		if (css === null) {
 			try {
 				const direct = await compileStyleBlockDirect({ block, source, filename: srcAbs || abs, projectRoot, scopeId, isProd, modulesOptions: server?.config?.css?.modules, verbose });
 				({ css, modules } = direct);
 				result.failed ||= direct.failed;
+				for (const dep of direct.dependencies) indexStyleDependency(dep, base);
 			} catch (e: any) {
 				if (verbose) console.warn('[sfc-asm][style] compile failed', base, i, e?.message || String(e));
 				result.failed = true;
@@ -263,6 +296,16 @@ export async function compileSfcStyles(opts: CompileSfcStylesOptions): Promise<S
 	}
 	result.css = renameDigitTerminatedScopedKeyframes(normalizeCssForDevice(out.join('\n')));
 	return result;
+}
+
+/**
+ * The SFCs whose `<style>` blocks depend on a stylesheet (`@import`, `@use`, `<style src>`), as
+ * recorded by {@link compileSfcStyles}.
+ * @param file Absolute path of the stylesheet.
+ * @returns Root-relative SFC paths, e.g. `/src/Home.vue`.
+ */
+export function getSfcsDependingOnStylesheet(file: string): string[] {
+	return Array.from(styleDependencyIndex.get(styleDependencyKey(file)) ?? []);
 }
 
 export const pluginTransformTypescript: any = (() => {

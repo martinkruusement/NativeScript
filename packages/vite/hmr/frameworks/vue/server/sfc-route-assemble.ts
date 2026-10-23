@@ -35,6 +35,14 @@ function setAsmCache(key: string, value: string): void {
 	}
 }
 
+/**
+ * Drop every cached assembly. The cache key cannot see the stylesheets an SFC's `<style>`
+ * blocks depend on, so the Vue strategy calls this when a stylesheet changes.
+ */
+export function clearSfcAsmCache(): void {
+	sfcAsmCache.clear();
+}
+
 // Attached like `__hmrId`, so the Vue-HMR strip passes leave them alone.
 function buildComponentPropertySnippet(name: string, value: unknown): string {
 	return `\n;try{ if (typeof __ns_sfc__ !== 'undefined' && __ns_sfc__) __ns_sfc__[${JSON.stringify(name)}] = ${JSON.stringify(value)}; }catch(__e){}\n`;

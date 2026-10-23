@@ -170,10 +170,12 @@ export interface FrameworkServerStrategy {
 	 * from the graph, and the prologue's broadcast makes the device fetch
 	 * `…?direct=1`, which creates that module and flips Analog to its
 	 * (NativeScript-inert) Vite css-update branch on every subsequent edit. The
-	 * global app-entry CSS path is unaffected (it is not component-scoped).
+	 * global app-entry CSS path is unaffected (it is not component-scoped). Vue
+	 * claims an edited `file` that only SFC `<style>` blocks consume: it
+	 * re-assembles those SFCs, so the raw file must not be installed globally.
 	 * Defaults to `false` (every flavor keeps the component-style broadcast).
 	 */
-	ownsComponentStyleHmr?(server: ViteDevServer): boolean;
+	ownsComponentStyleHmr?(server: ViteDevServer, file: string): boolean;
 
 	/**
 	 * Content-file edits (Tailwind scans) that change the generated `app.css`

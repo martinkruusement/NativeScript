@@ -1,11 +1,15 @@
 import { createHash } from 'crypto';
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import * as path from 'path';
+import type { ViteDevServer } from 'vite';
 import * as PAT from '../../../server/constants.js';
 import { rewriteVendorVueSpec } from '../../../helpers/vendor-rewrite.js';
 import type { FrameworkProcessFileContext, FrameworkRegistryContext, FrameworkRouteContext, FrameworkServerStrategy } from '../../../server/framework-strategy.js';
 import { getProjectAppPath } from '../../../../helpers/utils.js';
-import { runHotUpdatePrologue } from '../../../server/websocket-hot-update.js';
+import { isWithinHmrScope } from '../../../../helpers/hmr-scope.js';
+import { runHotUpdatePrologue, type NsHotUpdateContext } from '../../../server/websocket-hot-update.js';
+import { CSS_MODULE_RE } from '../../../server/css-device-module.js';
+import { isRuntimeGraphExcludedPath } from '../../../server/runtime-graph-filter.js';
 import { cleanCode, collectImportDependencies, processCodeForDevice, rewriteImports } from '../../../server/websocket-device-transform.js';
 import { isCoreGlobalsReference, isNativeScriptCoreModule, isNativeScriptPluginModule, resolveVendorFromCandidate } from '../../../server/websocket-module-specifiers.js';
 import { ensureRoutesDefaultExport } from '../../../server/websocket-served-module-helpers.js';
@@ -323,6 +327,114 @@ async function buildAndSendRegistry(ctx: FrameworkRegistryContext): Promise<void
 	}
 }
 
+// Stylesheets whose current edit only SFC `<style>` blocks consume.
+const sfcOwnedStylesheetEdits = new Set<string>();
+
+// Inline (`X.vue?vue&type=style…`) and `<style src>` (`x.css?vue&type=style…`) sub-requests.
+const STYLE_SUBREQUEST_RE = /[?&]vue&type=style\b/;
+const STYLESHEET_IMPORT_MAX_DEPTH = 8;
+
+type StyleGraphModule = { url?: string; file?: string | null; importers?: Iterable<StyleGraphModule> };
+
+// `sfcOnly`: every known importer of the file is an SFC style block.
+async function collectSfcsAffectedByStylesheet(server: ViteDevServer, file: string): Promise<{ affected: string[]; sfcOnly: boolean }> {
+	const root = server.config.root || process.cwd();
+	const { getSfcsDependingOnStylesheet } = await import('./sfc-route-shared.js');
+	const affected = new Set(getSfcsDependingOnStylesheet(file));
+	let sawImporter = false;
+	let sawOtherImporter = false;
+	const addOwner = (ownerFile: string) => {
+		const rel = '/' + path.posix.normalize(path.relative(root, ownerFile)).split(path.sep).join('/');
+		if (!rel.startsWith('/..')) affected.add(rel);
+	};
+	// Inline sub-requests are the SFC's file; it imports `<style src>` ones.
+	const addStyleSubrequestOwner = (mod: StyleGraphModule) => {
+		if (mod.file && PAT.VUE_FILE_PATTERN.test(mod.file)) {
+			addOwner(mod.file);
+			return;
+		}
+		for (const importer of mod.importers ?? []) {
+			sawImporter = true;
+			if (importer.file && PAT.VUE_FILE_PATTERN.test(importer.file)) addOwner(importer.file);
+			else sawOtherImporter = true;
+		}
+	};
+	const visited = new Set<StyleGraphModule>();
+	const walk = (mod: StyleGraphModule, depth: number) => {
+		if (visited.has(mod) || depth > STYLESHEET_IMPORT_MAX_DEPTH) return;
+		visited.add(mod);
+		if (STYLE_SUBREQUEST_RE.test(mod.url || '')) {
+			addStyleSubrequestOwner(mod);
+			return;
+		}
+		for (const importer of mod.importers ?? []) {
+			sawImporter = true;
+			if (STYLE_SUBREQUEST_RE.test(importer.url || '')) addStyleSubrequestOwner(importer);
+			else if (CSS_MODULE_RE.test(importer.url || '')) walk(importer, depth + 1);
+			else sawOtherImporter = true;
+		}
+	};
+	const graph = server.environments?.client?.moduleGraph ?? server.moduleGraph;
+	for (const mod of graph?.getModulesByFile(file) ?? []) walk(mod, 0);
+	return { affected: Array.from(affected), sfcOnly: affected.size > 0 && sawImporter && !sawOtherImporter };
+}
+
+// The assembler cache key cannot see stylesheet dependencies.
+async function prepareStylesheetHotUpdate(server: ViteDevServer, file: string, deps: NsHotUpdateContext): Promise<string[]> {
+	const { verbose } = deps;
+	try {
+		(await import('./sfc-route-assemble.js')).clearSfcAsmCache();
+		// The prologue's gates: no device update without its `ns:hmr-pending`.
+		if (!deps.wss || isRuntimeGraphExcludedPath(file) || !isWithinHmrScope(file, deps.getHmrSourceRootsCached())) return [];
+		const { affected, sfcOnly } = await collectSfcsAffectedByStylesheet(server, file);
+		if (sfcOnly) sfcOwnedStylesheetEdits.add(file);
+		if (verbose && affected.length) console.log(`[hmr-ws] stylesheet ${file} → re-assembling ${affected.join(', ')}${sfcOnly ? ' (SFC styles only, no css broadcast)' : ''}`);
+		return affected;
+	} catch (error) {
+		if (verbose) console.warn('[hmr-ws] stylesheet → SFC propagation failed', error);
+		return [];
+	}
+}
+
+// A rerender keeps the old `__cssModules` class map, so those SFCs reload.
+async function canRerenderStyleChange(root: string, rel: string): Promise<boolean> {
+	try {
+		const { parse } = await import('./sfc-route-shared.js');
+		const abs = path.join(root, rel.replace(/^\//, ''));
+		return !parse(readFileSync(abs, 'utf-8'), { filename: abs }).descriptor.styles.some((block) => block.module);
+	} catch {
+		return false;
+	}
+}
+
+async function broadcastStylesheetDependents(rels: string[], server: ViteDevServer, deps: NsHotUpdateContext): Promise<void> {
+	const { wss, moduleGraph, sfcFileMap, isSocketClientOpen } = deps;
+	if (!wss) return;
+	const root = server.config.root || process.cwd();
+	const ts = Date.now();
+	for (const rel of rels) {
+		const hash = createHash('md5').update(rel).digest('hex').slice(0, 8);
+		const fileName = sfcFileMap.get(rel) || `sfc-${hash}.mjs`;
+		sfcFileMap.set(rel, fileName);
+		const msg: VueSfcRegistryUpdateMessage = {
+			type: 'ns:vue-sfc-registry-update',
+			path: rel,
+			fileName,
+			ts,
+			version: moduleGraph.version,
+			rerenderOnly: await canRerenderStyleChange(root, rel),
+		};
+		const payload = JSON.stringify(msg);
+		wss.clients.forEach((client) => {
+			if (isSocketClientOpen(client)) {
+				try {
+					client.send(payload);
+				} catch {}
+			}
+		});
+	}
+}
+
 export const vueServerStrategy: FrameworkServerStrategy = {
 	flavor: 'vue',
 	matchesFile(id: string) {
@@ -333,9 +445,14 @@ export const vueServerStrategy: FrameworkServerStrategy = {
 	// changed `.vue` SFC — re-transform + clean it, register its nested `.vue`
 	// imports in the SFC map, and broadcast a metadata-only registry update so the
 	// device re-fetches the SFC artifact over HTTP. Non-`.vue` edits fall through
-	// (the prologue already handled CSS / the common graph delta).
+	// (the prologue already handled CSS / the common graph delta). A stylesheet
+	// edit also re-assembles every SFC whose `<style>` blocks depend on it.
 	async handleHotUpdate(ctx, deps) {
+		sfcOwnedStylesheetEdits.delete(ctx.file);
+		const styleDependents = CSS_MODULE_RE.test(ctx.file) ? await prepareStylesheetHotUpdate(ctx.server, ctx.file, deps) : [];
 		const state = await runHotUpdatePrologue(ctx, deps);
+		// After the prologue's `ns:hmr-pending`, like a `.vue` edit's registry update.
+		if (styleDependents.length) await broadcastStylesheetDependents(styleDependents, ctx.server, deps);
 		if (!state) return;
 		const { emitSummary } = state;
 		const { strategy, verbose, wss, moduleGraph, sfcFileMap, depFileMap, isSocketClientOpen, shouldRemapImport, sharedTransformRequest } = deps;
@@ -574,6 +691,10 @@ if (typeof __VUE_HMR_RUNTIME__ === 'undefined') {
 		emitSummary();
 		// CRITICAL: Return empty array to prevent Vite's default HMR
 		return [];
+	},
+	// Claimed once per edit; the re-assembled SFCs register the scoped css.
+	ownsComponentStyleHmr(_server, file) {
+		return sfcOwnedStylesheetEdits.delete(file);
 	},
 	preClean(code: string) {
 		let result = code;

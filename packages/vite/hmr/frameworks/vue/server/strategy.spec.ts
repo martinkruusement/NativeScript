@@ -1,4 +1,4 @@
-import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, it, expect, vi } from 'vitest';
 import { createHash } from 'crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
 import * as path from 'path';
@@ -20,6 +20,8 @@ vi.mock('../../../server/websocket-hot-update.js', () => ({
 import { rewriteVendorVueSpec } from '../../../helpers/vendor-rewrite.js';
 import { purgeVueTransformCachesForHotUpdate, vueServerStrategy } from './strategy.js';
 import { runHotUpdatePrologue } from '../../../server/websocket-hot-update.js';
+import * as sfcRouteAssemble from './sfc-route-assemble.js';
+import * as sfcRouteShared from './sfc-route-shared.js';
 import { getProjectAppVirtualPath } from '../../../../helpers/utils.js';
 import type { FrameworkProcessFileContext, FrameworkRegistryContext, FrameworkRouteContext } from '../../../server/framework-strategy.js';
 
@@ -339,6 +341,225 @@ describe('vueServerStrategy.handleHotUpdate', () => {
 		expect(server.transformRequest).not.toHaveBeenCalled();
 		expect(moduleGraph.upsert).not.toHaveBeenCalled();
 		expect(client.send).not.toHaveBeenCalled();
+	});
+});
+
+describe('vueServerStrategy stylesheet hot updates', () => {
+	let root: string;
+	let clearSfcAsmCache: ReturnType<typeof vi.spyOn>;
+	let getSfcsDependingOnStylesheet: ReturnType<typeof vi.spyOn>;
+
+	beforeAll(() => {
+		root = mkdtempSync(path.join(os.tmpdir(), 'vue-style-deps-'));
+		mkdirSync(path.join(root, 'src', 'components'), { recursive: true });
+		writeFileSync(path.join(root, 'src', 'components', 'Card.vue'), '<template><Label class="card" /></template>\n<style scoped>@import "../styles/theme.css";</style>\n');
+		writeFileSync(path.join(root, 'src', 'components', 'Boxed.vue'), '<template><Label :class="$style.box" /></template>\n<style module src="../styles/boxed.module.css"></style>\n');
+	});
+
+	afterAll(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	beforeEach(() => {
+		vi.mocked(runHotUpdatePrologue).mockReset();
+		clearSfcAsmCache = vi.spyOn(sfcRouteAssemble, 'clearSfcAsmCache');
+		getSfcsDependingOnStylesheet = vi.spyOn(sfcRouteShared, 'getSfcsDependingOnStylesheet').mockReturnValue([]);
+	});
+
+	afterEach(() => {
+		clearSfcAsmCache.mockRestore();
+		getSfcsDependingOnStylesheet.mockRestore();
+	});
+
+	const abs = (rel: string) => path.join(root, rel);
+	const node = (url: string, file: string | null, importers: unknown[] = []) => ({ url, file, importers: new Set(importers) });
+	const cardMain = () => node('/src/components/Card.vue', abs('src/components/Card.vue'));
+	const cardInlineStyle = () => node('/src/components/Card.vue?vue&type=style&index=0&inline&scoped=abc&lang.css', abs('src/components/Card.vue'));
+	const mainTs = () => node('/src/main.ts', abs('src/main.ts'));
+	const fileOnly = (file: string, importers: unknown[]) => node(`/@fs${file}`, file, importers);
+
+	function setup(graph: Record<string, unknown[]>) {
+		const client = { readyState: 1, send: vi.fn() };
+		const deps = {
+			strategy: vueServerStrategy,
+			verbose: false,
+			wss: { clients: new Set([client]) },
+			moduleGraph: { version: 3, upsert: vi.fn() },
+			sfcFileMap: new Map<string, string>(),
+			depFileMap: new Map<string, string>(),
+			isSocketClientOpen: (c: any) => !!c && c.readyState === 1,
+			shouldRemapImport: () => false,
+			sharedTransformRequest: null,
+			getHmrSourceRootsCached: () => [path.join(root, 'src')],
+		} as any;
+		const getModulesByFile = vi.fn((file: string) => (graph[file] ? new Set(graph[file]) : undefined));
+		const server = { config: { root }, moduleGraph: { getModulesByFile, onFileChange: vi.fn(), invalidateModule: vi.fn() }, transformRequest: vi.fn() } as any;
+		// Consult the hook the way the real prologue's css branch does.
+		const prologue: { owned?: boolean; sentBefore?: number } = {};
+		vi.mocked(runHotUpdatePrologue).mockImplementation(async (ctx, prologueDeps) => {
+			prologue.sentBefore = client.send.mock.calls.length;
+			prologue.owned = prologueDeps.strategy.ownsComponentStyleHmr?.(ctx.server, ctx.file);
+			return null;
+		});
+		const update = (file: string) => vueServerStrategy.handleHotUpdate!({ file, server } as any, deps);
+		const sent = () => client.send.mock.calls.map(([payload]) => JSON.parse(payload));
+		return { deps, server, prologue, update, sent, getModulesByFile };
+	}
+
+	it('re-assembles the SFC whose inline <style> imports the edited stylesheet and claims the edit', async () => {
+		const theme = abs('src/styles/theme.css');
+		const { deps, server, prologue, update, sent } = setup({ [theme]: [fileOnly(theme, [cardInlineStyle()])] });
+
+		await update(theme);
+
+		const fileName = `sfc-${createHash('md5').update('/src/components/Card.vue').digest('hex').slice(0, 8)}.mjs`;
+		expect(clearSfcAsmCache).toHaveBeenCalledTimes(1);
+		// Sent after the prologue's `ns:hmr-pending`, which claimed the edit.
+		expect(prologue).toEqual({ owned: true, sentBefore: 0 });
+		expect(sent()).toEqual([{ type: 'ns:vue-sfc-registry-update', path: '/src/components/Card.vue', fileName, ts: expect.any(Number), version: 3, rerenderOnly: true }]);
+		expect(deps.sfcFileMap.get('/src/components/Card.vue')).toBe(fileName);
+		expect(vueServerStrategy.ownsComponentStyleHmr!(server, theme)).toBe(false);
+	});
+
+	it('resolves a <style src> sub-request to the SFC that imports it', async () => {
+		const card = abs('src/styles/card.css');
+		const { prologue, update, sent } = setup({
+			[card]: [node('/src/styles/card.css?vue&type=style&index=0&src=abc&inline&scoped=abc&lang.css', card), node('/src/styles/card.css?vue&type=style&index=0&src=abc&scoped=abc&lang.css', card, [cardMain()])],
+		});
+
+		await update(card);
+
+		expect(prologue.owned).toBe(true);
+		expect(sent().map((msg) => msg.path)).toEqual(['/src/components/Card.vue']);
+	});
+
+	it('walks an @import chain up to the SFC style block', async () => {
+		const colors = abs('src/styles/_colors.css');
+		const { prologue, update, sent } = setup({ [colors]: [fileOnly(colors, [node('/src/styles/theme.css', abs('src/styles/theme.css'), [cardInlineStyle()])])] });
+
+		await update(colors);
+
+		expect(prologue.owned).toBe(true);
+		expect(sent().map((msg) => msg.path)).toEqual(['/src/components/Card.vue']);
+	});
+
+	it('keeps the css broadcast for a stylesheet another module imports too', async () => {
+		const theme = abs('src/styles/theme.css');
+		const { prologue, update, sent } = setup({ [theme]: [fileOnly(theme, [cardInlineStyle(), mainTs()])] });
+
+		await update(theme);
+
+		expect(prologue.owned).toBe(false);
+		expect(sent().map((msg) => msg.path)).toEqual(['/src/components/Card.vue']);
+	});
+
+	it('re-assembles the SFCs recorded at compile time, keeping the css broadcast while no importer is known', async () => {
+		const shared = abs('src/styles/shared.css');
+		getSfcsDependingOnStylesheet.mockReturnValue(['/src/components/Card.vue']);
+		const { prologue, update, sent } = setup({});
+
+		await update(shared);
+
+		expect(getSfcsDependingOnStylesheet).toHaveBeenCalledWith(shared);
+		expect(prologue.owned).toBe(false);
+		expect(sent().map((msg) => msg.path)).toEqual(['/src/components/Card.vue']);
+	});
+
+	it('reloads instead of rerendering an SFC with <style module> or one it cannot read', async () => {
+		getSfcsDependingOnStylesheet.mockReturnValue(['/src/components/Boxed.vue', '/src/components/Card.vue', '/src/components/Missing.vue']);
+		const { update, sent } = setup({});
+
+		await update(abs('src/styles/boxed.module.css'));
+
+		expect(sent().map((msg) => [msg.path, msg.rerenderOnly])).toEqual([
+			['/src/components/Boxed.vue', false],
+			['/src/components/Card.vue', true],
+			['/src/components/Missing.vue', false],
+		]);
+	});
+
+	it('propagates a sass partial edit, which the prologue does not treat as css', async () => {
+		const vars = abs('src/styles/_vars.scss');
+		const { server, update, sent } = setup({ [vars]: [fileOnly(vars, [node('/src/components/Card.vue?vue&type=style&index=0&inline&lang.scss', abs('src/components/Card.vue'))])] });
+		vi.mocked(runHotUpdatePrologue).mockResolvedValue({ root, updateRel: '/src/styles/_vars.scss', metrics: {} as any, emitSummary: vi.fn() } as any);
+
+		expect(await update(vars)).toBeUndefined();
+
+		expect(sent().map((msg) => msg.path)).toEqual(['/src/components/Card.vue']);
+		expect(server.transformRequest).not.toHaveBeenCalled();
+	});
+
+	it('only drops the assembler cache for a stylesheet no SFC depends on', async () => {
+		const { prologue, update, sent } = setup({ [abs('src/app.css')]: [node('/src/app.css', abs('src/app.css'), [mainTs()])] });
+
+		await update(abs('src/app.css'));
+
+		expect(clearSfcAsmCache).toHaveBeenCalledTimes(1);
+		expect(prologue.owned).toBe(false);
+		expect(sent()).toEqual([]);
+	});
+
+	it('ignores SFCs outside the project root', async () => {
+		const theme = abs('src/styles/theme.css');
+		const { prologue, update, sent } = setup({ [theme]: [fileOnly(theme, [node('/@fs/elsewhere/Outside.vue?vue&type=style&index=0&inline&lang.css', '/elsewhere/Outside.vue')])] });
+
+		await update(theme);
+
+		expect(prologue.owned).toBe(false);
+		expect(sent()).toEqual([]);
+	});
+
+	it('only drops the assembler cache for a stylesheet edit the prologue ignores', async () => {
+		const outside = abs('shared/theme.css');
+		const excluded = abs('src/__tests__/theme.css');
+		getSfcsDependingOnStylesheet.mockReturnValue(['/src/components/Card.vue']);
+		const { prologue, update, sent, getModulesByFile } = setup({ [outside]: [fileOnly(outside, [cardInlineStyle()])], [excluded]: [fileOnly(excluded, [cardInlineStyle()])] });
+
+		for (const file of [outside, excluded]) {
+			await update(file);
+			expect(prologue.owned).toBe(false);
+		}
+
+		expect(clearSfcAsmCache).toHaveBeenCalledTimes(2);
+		expect(getModulesByFile).not.toHaveBeenCalled();
+		expect(sent()).toEqual([]);
+	});
+
+	it('leaves the assembler cache and the module graph alone for other edits', async () => {
+		const { update, getModulesByFile } = setup({});
+
+		await update(abs('src/utils.ts'));
+
+		expect(clearSfcAsmCache).not.toHaveBeenCalled();
+		expect(getSfcsDependingOnStylesheet).not.toHaveBeenCalled();
+		expect(getModulesByFile).not.toHaveBeenCalled();
+	});
+
+	it('claims each stylesheet of a concurrently handled batch once, per file', async () => {
+		const [a, b, c] = ['a.css', 'b.css', 'c.css'].map((name) => abs(`src/styles/${name}`));
+		const { deps, server } = setup({ [a]: [fileOnly(a, [cardInlineStyle()])], [b]: [fileOnly(b, [cardInlineStyle()])], [c]: [fileOnly(c, [mainTs()])] });
+		vi.mocked(runHotUpdatePrologue).mockResolvedValue(null);
+
+		await Promise.all([a, b, c].map((file) => vueServerStrategy.handleHotUpdate!({ file, server } as any, deps)));
+
+		expect(vueServerStrategy.ownsComponentStyleHmr!(server, b)).toBe(true);
+		expect(vueServerStrategy.ownsComponentStyleHmr!(server, c)).toBe(false);
+		expect(vueServerStrategy.ownsComponentStyleHmr!(server, a)).toBe(true);
+		expect(vueServerStrategy.ownsComponentStyleHmr!(server, a)).toBe(false);
+		expect(vueServerStrategy.ownsComponentStyleHmr!(server, b)).toBe(false);
+	});
+
+	it('drops an unconsumed claim when the stylesheet is edited again', async () => {
+		const theme = abs('src/styles/theme.css');
+		const graph: Record<string, unknown[]> = { [theme]: [fileOnly(theme, [cardInlineStyle()])] };
+		const { server, update } = setup(graph);
+		vi.mocked(runHotUpdatePrologue).mockResolvedValue(null);
+
+		await update(theme);
+		graph[theme] = [fileOnly(theme, [cardInlineStyle(), mainTs()])];
+		await update(theme);
+
+		expect(vueServerStrategy.ownsComponentStyleHmr!(server, theme)).toBe(false);
 	});
 });
 

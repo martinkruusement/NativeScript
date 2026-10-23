@@ -1,10 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs';
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync } from 'fs';
 import * as path from 'path';
 import os from 'os';
 
-import { canonicalizeNsMAppImports, compileSfcStyles, isProductionCompile, parse, resolveSfcDescriptorId } from './sfc-route-shared.js';
+import { canonicalizeNsMAppImports, compileSfcStyles, getSfcsDependingOnStylesheet, isProductionCompile, parse, resolveSfcDescriptorId } from './sfc-route-shared.js';
 
 describe('canonicalizeNsMAppImports', () => {
 	it('leaves canonical app-source static imports untouched', () => {
@@ -264,5 +264,76 @@ describe('compileSfcStyles', () => {
 		const result = await compileSfcStyles({ descriptor, base: '/src/App.vue', abs, projectRoot: root, appVirtualWithSlash: '/src/', mainCode: '_sfc_main.__hmrId = "0f0f0f0f"' });
 		expect(result.scopeId).toBe('0f0f0f0f');
 		expect(result.css).toContain('.a[data-v-0f0f0f0f]');
+	});
+});
+
+describe('getSfcsDependingOnStylesheet', () => {
+	let root: string;
+	let stylesDir: string;
+
+	beforeAll(() => {
+		root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'sfc-style-deps-')));
+		stylesDir = path.join(root, 'src', 'styles');
+		mkdirSync(stylesDir, { recursive: true });
+		writeFileSync(path.join(stylesDir, 'card.css'), '.card { color: red; }');
+		writeFileSync(path.join(stylesDir, '_colors.scss'), '$accent: #123456;');
+	});
+
+	afterAll(() => {
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	function compile(base: string, source: string, server?: any, projectRoot = root) {
+		const abs = path.join(root, base.replace(/^\//, ''));
+		const { descriptor } = parse(source, { filename: abs });
+		return compileSfcStyles({ server, descriptor, base, abs, projectRoot, appVirtualWithSlash: '/src/', scopeId: '7ba5bd91' });
+	}
+
+	it('records the file of a <style src> block, also before the file exists', async () => {
+		await compile('/src/SrcDep.vue', '<template><Label /></template>\n<style scoped src="./styles/card.css"></style>\n<style src="./styles/later.css"></style>');
+
+		expect(getSfcsDependingOnStylesheet(path.join(stylesDir, 'card.css'))).toEqual(['/src/SrcDep.vue']);
+		expect(getSfcsDependingOnStylesheet(path.join(stylesDir, 'later.css'))).toEqual(['/src/SrcDep.vue']);
+	});
+
+	it('records the files the Vite pipeline read for a block', async () => {
+		const getModuleByUrl = vi.fn(async () => ({ importedModules: new Set([{ file: path.join(stylesDir, '_theme.css') }, { file: null }]) }));
+		const server = { config: { root }, moduleGraph: { getModuleByUrl }, transformRequest: vi.fn(async () => ({ code: 'export default ".a { color: red; }"' })) };
+		await compile('/src/ViteDep.vue', "<template><Label /></template>\n<style>@import './styles/_theme.css';</style>", server);
+
+		expect(getModuleByUrl).toHaveBeenCalledWith('/src/ViteDep.vue?vue&type=style&index=0&inline&lang.css');
+		expect(getSfcsDependingOnStylesheet(path.join(stylesDir, '_theme.css'))).toEqual(['/src/ViteDep.vue']);
+	});
+
+	it("reads the client environment's module graph when there is one", async () => {
+		const legacy = vi.fn(async () => undefined);
+		const client = vi.fn(async () => ({ importedModules: new Set([{ file: path.join(stylesDir, '_client.css') }]) }));
+		const server = { config: { root }, environments: { client: { moduleGraph: { getModuleByUrl: client } } }, moduleGraph: { getModuleByUrl: legacy }, transformRequest: vi.fn(async () => ({ code: 'export default ""' })) };
+		await compile('/src/ClientDep.vue', '<template><Label /></template>\n<style>.a { color: red; }</style>', server);
+
+		expect(legacy).not.toHaveBeenCalled();
+		expect(getSfcsDependingOnStylesheet(path.join(stylesDir, '_client.css'))).toEqual(['/src/ClientDep.vue']);
+	});
+
+	it('records the sass partials of a direct compile', async () => {
+		const result = await compile('/src/SassDep.vue', '<template><Label /></template>\n<style lang="scss">@use \'./styles/colors\' as c;\n.a { color: c.$accent; }</style>', undefined, import.meta.dirname);
+
+		expect(result.css).toContain('#123456');
+		expect(getSfcsDependingOnStylesheet(path.join(stylesDir, '_colors.scss'))).toEqual(['/src/SassDep.vue']);
+	});
+
+	it('keeps compiling when the module graph lookup fails', async () => {
+		const server = { config: { root }, moduleGraph: { getModuleByUrl: vi.fn(async () => Promise.reject(new Error('boom'))) }, transformRequest: vi.fn(async () => ({ code: 'export default ".kept { color: red; }"' })) };
+		const result = await compile('/src/GraphFails.vue', '<template><Label /></template>\n<style>.kept { color: red; }</style>', server);
+
+		expect(result).toMatchObject({ css: '.kept { color: red; }', failed: false });
+	});
+
+	it('lists every SFC that depends on a stylesheet, for any spelling of its path', async () => {
+		await compile('/src/A.vue', '<template><Label /></template>\n<style src="./styles/shared.css"></style>');
+		await compile('/src/B.vue', '<template><Label /></template>\n<style scoped src="./styles/shared.css"></style>');
+
+		expect(getSfcsDependingOnStylesheet(path.join(stylesDir, '..', 'styles', 'shared.css'))).toEqual(['/src/A.vue', '/src/B.vue']);
+		expect(getSfcsDependingOnStylesheet(path.join(stylesDir, 'unrelated.css'))).toEqual([]);
 	});
 });

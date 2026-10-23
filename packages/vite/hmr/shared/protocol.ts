@@ -141,7 +141,7 @@ export interface VueSfcRegistryMessage {
 	ts: number;
 }
 
-/** Mapping-only Vue SFC registry update emitted ahead of the artifact for a changed `.vue` file. */
+/** Mapping-only Vue SFC registry update emitted ahead of the artifact for a changed `.vue` file, or for an SFC whose `<style>` depends on a changed stylesheet. */
 export interface VueSfcRegistryUpdateMessage {
 	type: 'ns:vue-sfc-registry-update';
 	path: string;

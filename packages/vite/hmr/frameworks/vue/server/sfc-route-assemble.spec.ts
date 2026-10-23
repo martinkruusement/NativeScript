@@ -10,7 +10,7 @@ vi.mock('../../../server/websocket-device-transform.js', async (importOriginal) 
 });
 
 import { processCodeForDevice } from '../../../server/websocket-device-transform.js';
-import { registerSfcAsmRoute } from './sfc-route-assemble.js';
+import { clearSfcAsmCache, registerSfcAsmRoute } from './sfc-route-assemble.js';
 
 const ID = '5c0ffee5';
 
@@ -172,5 +172,17 @@ describe('registerSfcAsmRoute <style> support', () => {
 		};
 		const { code, base } = await assemble('Broken.vue', '<template><Label text="a" /></template>\n<script setup>\nconst a = 1;\n</script>\n<style>\n.a { color: red;\n</style>\n', { transform: failing });
 		expect(registeredCss(code, base)).toBeNull();
+	});
+
+	it('serves the cached assembly until clearSfcAsmCache drops it', async () => {
+		const source = '<template><Label class="dep" text="a" /></template>\n<script setup>\nconst a = 1;\n</script>\n<style src="./cached-dep.css"></style>\n';
+		writeFileSync(path.join(root, 'src', 'cached-dep.css'), '.dep { color: red; }');
+		expect(registeredCss((await assemble('CachedDep.vue', source)).code, '/src/CachedDep.vue')).toContain('color: red');
+
+		writeFileSync(path.join(root, 'src', 'cached-dep.css'), '.dep { color: blue; }');
+		expect(registeredCss((await assemble('CachedDep.vue', source)).code, '/src/CachedDep.vue')).toContain('color: red');
+
+		clearSfcAsmCache();
+		expect(registeredCss((await assemble('CachedDep.vue', source)).code, '/src/CachedDep.vue')).toContain('color: blue');
 	});
 });

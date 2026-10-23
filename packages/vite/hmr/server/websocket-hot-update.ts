@@ -288,7 +288,7 @@ export async function runHotUpdatePrologue(ctx: HmrContext, deps: NsHotUpdateCon
 		// create the css `?direct` module that stops the framework from
 		// re-emitting its component-update on subsequent edits. The framework's
 		// own `handleHotUpdate` (a separate plugin) drives the update.
-		if (!isGlobalStyle && strategy.ownsComponentStyleHmr?.(server)) {
+		if (!isGlobalStyle && strategy.ownsComponentStyleHmr?.(server, file)) {
 			updateMetrics.tAfterFramework = Date.now();
 			if (verbose) console.log(`[hmr-ws] component style edit ${file} → left to framework component-update (no css broadcast)`);
 			emitHmrUpdateSummary();

@@ -30,7 +30,8 @@ const defaultPropagationDeps: VueDepPropagationDeps = {
  * Non-SFC dependency propagation. When a plain `.ts`/`.js` module changes, the
  * shared queue evicts + re-imports it, but the live component instances still
  * hold bindings to the OLD module instance — nothing on the Vue side remounts
- * (the server only emits `ns:vue-sfc-registry-update` for `.vue` edits). Walk
+ * (the server emits `ns:vue-sfc-registry-update` only for `.vue` edits and for
+ * stylesheets an SFC's `<style>` depends on). Walk
  * the reverse import graph to every `.vue` boundary, re-assemble each one
  * (`loadSfcComponent` links the freshly re-imported deps) and reload its
  * mounted instances in place, as the registry-update path does. Boundaries
