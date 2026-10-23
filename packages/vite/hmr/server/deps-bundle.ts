@@ -458,7 +458,11 @@ function createDepsImportRoutingPlugin(projectRoot: string, workspaceRoot: strin
 					return { path: `/ns/m/${key.replace(SCRIPT_EXT_RE, '')}`, external: true };
 				}
 				if (spec.startsWith('.') || spec.startsWith('/') || /^[A-Za-z]:[\\/]/.test(spec)) return undefined;
-				if (NODE_BUILTIN_SET.has(spec)) return undefined;
+				if (NODE_BUILTIN_SET.has(spec)) {
+					// The device import map only routes the `node:` form.
+					if (args.kind === 'import-statement' && !spec.startsWith('node:')) return { path: `node:${spec}`, external: true };
+					return undefined;
+				}
 				if (/^@nativescript\/core(?:\/|$)/.test(spec)) {
 					return { path: spec, external: true };
 				}

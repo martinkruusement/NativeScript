@@ -317,6 +317,11 @@ function createFixtureProject(): string {
 	write('node_modules/pkg-media/package.json', JSON.stringify({ name: 'pkg-media', version: '1.0.0', module: 'index.js' }));
 	write('node_modules/pkg-media/index.js', `export { Audio } from './audio';\n`);
 	write('node_modules/pkg-media/audio.js', `throw new Error('pkg-media is not supported here');\n`);
+	// Node builtins in each import form, plus an installed `events` polyfill.
+	write('node_modules/pkg-node-builtins/package.json', JSON.stringify({ name: 'pkg-node-builtins', version: '1.0.0', module: 'index.js' }));
+	write('node_modules/pkg-node-builtins/index.js', `import 'util';\nimport { join } from 'path';\nimport { readFile } from 'fs/promises';\nimport { format } from 'node:url';\nimport { EventEmitter } from 'events';\nexport { deflate } from 'zlib';\nexport const used = [join, readFile, format, EventEmitter];\nexport const loadOs = () => import('os');\nexport function requireTty() {\n  return require('tty');\n}\n`);
+	write('node_modules/events/package.json', JSON.stringify({ name: 'events', version: '3.3.0', module: 'events.js' }));
+	write('node_modules/events/events.js', `export const EventEmitter = 'events-polyfill';\n`);
 	return projectRoot;
 }
 
@@ -453,6 +458,31 @@ describe('generateDepsBundle', () => {
 		// internalized the same way.
 		expect(state!.keys).toContain('node_modules/pkg-i/index.js');
 		expect(state!.code).not.toContain('from "pkg-i"');
+	});
+
+	it('routes bare Node builtin import statements through the node: form the device import map serves', async () => {
+		const state = await generateDepsBundle({ projectRoot, platform: 'ios', mode: 'development', flavor: 'typescript', recordedPaths: ['/ns/m/node_modules/pkg-node-builtins/index.js'] });
+		expect(state).not.toBeNull();
+		expect(state!.code).toContain('import "node:util";');
+		expect(state!.code).toContain('import { join } from "node:path";');
+		expect(state!.code).toContain('import { readFile } from "node:fs/promises";');
+		expect(state!.code).toContain('import { deflate } from "node:zlib";');
+		expect(state!.code).not.toMatch(/(?:import|from) "(?:util|path|fs\/promises|zlib)"/);
+		// Already-prefixed specifiers pass through unchanged.
+		expect(state!.code).toContain('import { format } from "node:url";');
+		expect(state!.code).not.toContain('node:node:');
+	});
+
+	it('keeps require() and import() of Node builtins, and installed builtin polyfills, as they were', async () => {
+		const state = await generateDepsBundle({ projectRoot, platform: 'ios', mode: 'development', flavor: 'typescript', recordedPaths: ['/ns/m/node_modules/pkg-node-builtins/index.js'] });
+		expect(state).not.toBeNull();
+		expect(state!.code).toContain('__require("tty")');
+		expect(state!.code).toContain('import("os")');
+		expect(state!.code).not.toMatch(/node:(?:tty|os)\b/);
+		// An installed npm package named like a builtin is still bundled.
+		expect(state!.keys).toContain('node_modules/events/events.js');
+		expect(state!.code).toContain('events-polyfill');
+		expect(state!.code).not.toMatch(/"(?:node:)?events"/);
 	});
 
 	it('prepends platform polyfills to the payload', async () => {
