@@ -90,23 +90,45 @@ export function applyCssText(cssText: string, tag: string = APP_CSS_TAG): void {
 	}
 }
 
-// Fetch helper
-export async function fetchText(url: string): Promise<string> {
-	try {
+export const CSS_FETCH_TIMEOUT_MS = 10000;
+
+/**
+ * Fetches the stylesheet for an update without `cssText` (older server, or css it could not compile).
+ * @param url Absolute stylesheet URL.
+ * @param timeoutMs Time after which an unsettled request is abandoned.
+ * @returns The response text, or `''` when the request fails or times out.
+ */
+export async function fetchText(url: string, timeoutMs: number = CSS_FETCH_TIMEOUT_MS): Promise<string> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<undefined>((resolve) => {
+		timer = setTimeout(() => resolve(undefined), timeoutMs);
+	});
+	const request = (async () => {
+		// Core Http bypasses XMLHttpRequest polyfills that can leave fetch() hanging.
+		const Http = getCore('Http');
+		if (Http && typeof Http.getString === 'function') {
+			return await Http.getString(url);
+		}
 		const g = getGlobalScope();
 		if (typeof g.fetch === 'function') {
 			const res = await g.fetch(url);
 			return await res.text();
 		}
-		const Http = g.Http;
-		if (Http && Http.getString) {
-			return await Http.getString(url);
-		}
 		if (VERBOSE) console.warn('[ns-hmr] No fetch method available');
 		return '';
+	})();
+	try {
+		const text = await Promise.race([request, timeout]);
+		if (text === undefined) {
+			console.warn(`[ns-hmr] CSS fetch did not complete within ${timeoutMs}ms: ${url}`);
+			return '';
+		}
+		return text;
 	} catch (e) {
 		console.warn('[ns-hmr] Fetch failed:', e?.message || String(e));
 		return '';
+	} finally {
+		clearTimeout(timer);
 	}
 }
 
@@ -116,15 +138,23 @@ export async function handleCssUpdates(cssUpdates: any[], httpOrigin: string): P
 	for (const update of cssUpdates) {
 		try {
 			const cssPath = update.path || update.acceptedPath || '';
-			if (!cssPath || !httpOrigin) continue;
+			if (!cssPath) continue;
 
-			// Build URL: origin + path + ?direct=1&t=<timestamp>
-			const timestamp = update.timestamp || Date.now();
-			const sep = cssPath.includes('?') ? '&' : '?';
-			const url = `${httpOrigin}${cssPath}${sep}direct=1&t=${timestamp}`;
+			let cssText: string;
+			if (typeof update.cssText === 'string') {
+				cssText = update.cssText;
+				if (VERBOSE) console.info('[ns-hmr] CSS update carried its text:', cssPath);
+			} else {
+				if (!httpOrigin) continue;
 
-			if (VERBOSE) console.info('[ns-hmr] Fetching CSS:', url);
-			const cssText = await fetchText(url);
+				// Build URL: origin + path + ?direct=1&t=<timestamp>
+				const timestamp = update.timestamp || Date.now();
+				const sep = cssPath.includes('?') ? '&' : '?';
+				const url = `${httpOrigin}${cssPath}${sep}direct=1&t=${timestamp}`;
+
+				if (VERBOSE) console.info('[ns-hmr] Fetching CSS:', url);
+				cssText = await fetchText(url);
+			}
 			if (cssText) {
 				// `tag` scopes the replace: app entry CSS (no tag) uses the
 				// default `app.css` tag; component `styleUrls` edits carry their

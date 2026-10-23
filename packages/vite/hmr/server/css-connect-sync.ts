@@ -1,6 +1,6 @@
 import type { ViteDevServer } from 'vite';
 import { getAppCssState } from '../../helpers/app-css-state.js';
-import { appCssRootRelPath, buildCssUpdateItem, buildCssUpdatesMessage } from './css-update-message.js';
+import { appCssRootRelPath, buildCssUpdateItem, buildCssUpdatesMessage, loadCssUpdateText } from './css-update-message.js';
 import { isSocketClientOpen } from './socket-utils.js';
 
 /**
@@ -50,7 +50,12 @@ export async function maybeSendConnectCssSync(server: ViteDevServer, ws: { send:
 		return false;
 	}
 
-	const msg = buildCssUpdatesMessage(server, [buildCssUpdateItem(appCssRel)], { reason: 'connect-sync' });
+	const cssText = await loadCssUpdateText(server, appCssRel, { verbose: opts.verbose });
+	if (!isSocketClientOpen(ws)) {
+		return false;
+	}
+
+	const msg = buildCssUpdatesMessage(server, [buildCssUpdateItem(appCssRel, { cssText })], { reason: 'connect-sync' });
 	try {
 		ws.send(JSON.stringify(msg));
 	} catch (error) {

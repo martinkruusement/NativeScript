@@ -11,7 +11,7 @@ import { getAppCssState } from '../../helpers/app-css-state.js';
 import { classifyHmrUpdateKind, formatHmrUpdateSummary } from './perf-instrumentation.js';
 import { createHmrPendingMessage } from './websocket-hmr-pending.js';
 import type { CssUpdateItem } from '../shared/protocol.js';
-import { appCssRootRelPath, buildCssUpdateItem, buildCssUpdatesMessage } from './css-update-message.js';
+import { appCssRootRelPath, buildCssUpdateItem, buildCssUpdatesMessage, loadCssUpdateText } from './css-update-message.js';
 import { processContentCssUpdate } from './content-css-update.js';
 import { getServerOrigin } from './server-origin.js';
 import type { BootstrapRootComponent } from '../frameworks/angular/server/angular-root-component.js';
@@ -269,7 +269,7 @@ export async function runHotUpdatePrologue(ctx: HmrContext, deps: NsHotUpdateCon
 	//
 	//   • COMPONENT style (`styleUrls`, including workspace-library
 	//     components). Broadcast the style file's OWN path under a per-file
-	//     tag. The device fetches that component's CSS and replaces just that
+	//     tag. The device applies that component's CSS and replaces just that
 	//     file's selectors (`addTaggedAdditionalCSS` keyed by the file path),
 	//     re-styling the live view without a reboot or `ɵɵreplaceMetadata`
 	//     swap. `app.css` is never involved — it does not contain the
@@ -284,7 +284,8 @@ export async function runHotUpdatePrologue(ctx: HmrContext, deps: NsHotUpdateCon
 		// Component-scoped style edit the framework applies in place itself
 		// (Angular + Analog liveReload → `angular:component-update`). Suppress
 		// the `ns:css-updates` broadcast: it can't win the emulated-scoping
-		// specificity battle anyway, AND the device's `?direct=1` fetch would
+		// specificity battle anyway, AND compiling the css for the broadcast
+		// (the `cssText` load below, or the device's `?direct=1` fetch) would
 		// create the css `?direct` module that stops the framework from
 		// re-emitting its component-update on subsequent edits. The framework's
 		// own `handleHotUpdate` (a separate plugin) drives the update.
@@ -309,7 +310,8 @@ export async function runHotUpdatePrologue(ctx: HmrContext, deps: NsHotUpdateCon
 			return null;
 		}
 		try {
-			const msg = buildCssUpdatesMessage(server, [buildCssUpdateItem(broadcastPath, { tag })]);
+			const cssText = await loadCssUpdateText(server, broadcastPath, { verbose });
+			const msg = buildCssUpdatesMessage(server, [buildCssUpdateItem(broadcastPath, { tag, cssText })]);
 			wss.clients.forEach((client) => {
 				if (isSocketClientOpen(client)) {
 					client.send(JSON.stringify(msg));

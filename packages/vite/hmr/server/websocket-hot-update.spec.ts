@@ -187,7 +187,7 @@ describe('runHotUpdatePrologue', () => {
 		const wss = { clients: new Set<FakeClient>([openClient]) } as any;
 		const deps = makeDeps({ wss, getHmrSourceRootsCached: () => ['/proj/src', '/libs'] });
 		const ctx = makeCtx('/libs/theme/_buttons.css');
-		// The edited partial is an @import dep of app.css → refetch app.css.
+		// The edited partial is an @import dep of app.css → re-send app.css.
 		appCssStateModule.setAppCssState(ctx.server as any, { path: '/proj/src/app.css', deps: new Set<string>(['/libs/theme/_buttons.css']), refresh: noopRefresh });
 		const result = await runHotUpdatePrologue(ctx, deps);
 		expect(result).toBeNull();
@@ -198,9 +198,63 @@ describe('runHotUpdatePrologue', () => {
 		expect(update.tag).toBeUndefined();
 	});
 
+	it('carries the compiled stylesheet in a global stylesheet broadcast', async () => {
+		const openClient: FakeClient = { readyState: 1, send: vi.fn() };
+		const wss = { clients: new Set<FakeClient>([openClient]) } as any;
+		const deps = makeDeps({ wss, getHmrSourceRootsCached: () => ['/proj/src', '/libs'] });
+		const transformRequest = vi.fn(async (url: string) => (url === '/src/app.css?direct' ? { code: '.btn { color: red; }' } : null));
+		const ctx = makeCtx('/libs/theme/_buttons.css', { transformRequest });
+		appCssStateModule.setAppCssState(ctx.server as any, { path: '/proj/src/app.css', deps: new Set<string>(['/libs/theme/_buttons.css']), refresh: noopRefresh });
+
+		await runHotUpdatePrologue(ctx, deps);
+
+		const cssMsg = openClient.send.mock.calls.map((c) => JSON.parse(String(c[0]))).find((m) => m.type === 'ns:css-updates');
+		expect(cssMsg.updates[0]).toMatchObject({ path: '/src/app.css', cssText: '.btn { color: red; }' });
+		expect(cssMsg.updates[0].tag).toBeUndefined();
+		expect(transformRequest).toHaveBeenCalledWith('/src/app.css?direct');
+	});
+
+	it('carries the compiled stylesheet in a component style broadcast', async () => {
+		const openClient: FakeClient = { readyState: 1, send: vi.fn() };
+		const wss = { clients: new Set<FakeClient>([openClient]) } as any;
+		const deps = makeDeps({ wss, getHmrSourceRootsCached: () => ['/proj/src'] });
+		const transformRequest = vi.fn(async (url: string) => (url === '/src/app/header/header.component.css?direct' ? { code: '.header { color: blue; }' } : null));
+
+		await runHotUpdatePrologue(makeCtx('/proj/src/app/header/header.component.css', { transformRequest }), deps);
+
+		const cssMsg = openClient.send.mock.calls.map((c) => JSON.parse(String(c[0]))).find((m) => m.type === 'ns:css-updates');
+		expect(cssMsg.updates[0]).toMatchObject({ path: '/src/app/header/header.component.css', tag: '/src/app/header/header.component.css', cssText: '.header { color: blue; }' });
+	});
+
+	it('omits cssText from the broadcast when the stylesheet cannot be compiled (the device fetches it)', async () => {
+		const openClient: FakeClient = { readyState: 1, send: vi.fn() };
+		const wss = { clients: new Set<FakeClient>([openClient]) } as any;
+		const deps = makeDeps({ wss, getHmrSourceRootsCached: () => ['/proj/src'] });
+		const transformRequest = vi.fn(async () => {
+			throw new Error('CssSyntaxError');
+		});
+		const ctx = makeCtx('/proj/src/app.css', { transformRequest });
+		appCssStateModule.setAppCssState(ctx.server as any, { path: '/proj/src/app.css', deps: new Set<string>(), refresh: noopRefresh });
+
+		await runHotUpdatePrologue(ctx, deps);
+
+		const cssMsg = openClient.send.mock.calls.map((c) => JSON.parse(String(c[0]))).find((m) => m.type === 'ns:css-updates');
+		expect(cssMsg.updates[0].path).toBe('/src/app.css');
+		expect(cssMsg.updates[0]).not.toHaveProperty('cssText');
+	});
+
+	it('does not compile a component stylesheet the framework updates itself (keeps its ?direct module absent)', async () => {
+		const deps = makeDeps({ wss: { clients: new Set<FakeClient>([{ readyState: 1, send: vi.fn() }]) } as any, strategy: { flavor: 'angular', ownsComponentStyleHmr: () => true } as any, getHmrSourceRootsCached: () => ['/proj/src'] });
+		const ctx = makeCtx('/proj/src/app/header/header.component.css');
+
+		await runHotUpdatePrologue(ctx, deps);
+
+		expect(ctx.server.transformRequest).not.toHaveBeenCalled();
+	});
+
 	it('broadcasts an app.css refresh when regenerated Tailwind output changes', async () => {
 		// A brand-new utility class (e.g. `text-green-500`) added to a
-		// workspace-lib template only renders if the device re-fetches
+		// workspace-lib template only renders if the device reloads
 		// `app.css` so Tailwind's content scan regenerates. The lib template
 		// IS in the preprocessCSS dep set (Vite expands Tailwind's
 		// dir-dependency globs), but the old project-scope re-filter returned
@@ -292,6 +346,44 @@ describe('runHotUpdatePrologue', () => {
 		const cssMsg = openClient.send.mock.calls.map((c) => JSON.parse(String(c[0]))).find((m) => m.type === 'ns:css-updates');
 		expect(cssMsg).toBeTruthy();
 		expect(cssMsg.updates[0].path).toBe('/src/app.css');
+	});
+
+	it('carries the regenerated stylesheet in the Tailwind content-file broadcast', async () => {
+		const openClient: FakeClient = { readyState: 1, send: vi.fn() };
+		const wss = { clients: new Set<FakeClient>([openClient]) } as any;
+		const file = '/proj/src/app/listen-now.component.ts';
+		const deps = makeDeps({ wss, getHmrSourceRootsCached: () => ['/proj/src'] });
+		const ctx = makeCtx(file, { transformRequest: vi.fn(async (url: string) => (url === '/src/app.css?direct' ? { code: '.pt-6 { padding-top: 24; }' } : null)) });
+		appCssStateModule.setAppCssState(ctx.server as any, { path: '/proj/src/app.css', deps: new Set<string>([file]), refresh: vi.fn(async () => ({ changed: true, changedSinceStartup: true })) } as any);
+
+		await runHotUpdatePrologue(ctx, deps);
+
+		const cssMsg = openClient.send.mock.calls.map((c) => JSON.parse(String(c[0]))).find((m) => m.type === 'ns:css-updates');
+		expect(cssMsg.updates[0]).toMatchObject({ path: '/src/app.css', cssText: '.pt-6 { padding-top: 24; }' });
+	});
+
+	it('carries the regenerated stylesheet in the update deferred to the framework', async () => {
+		const wss = { clients: new Set<FakeClient>([{ readyState: 1, send: vi.fn() }]) } as any;
+		const file = '/proj/src/app/listen-now.component.ts';
+		const strategy = { flavor: 'angular', defersContentCssToFrameworkUpdate: () => true } as any;
+		const deps = makeDeps({ wss, strategy, getHmrSourceRootsCached: () => ['/proj/src'] });
+		const ctx = makeCtx(file, { transformRequest: vi.fn(async (url: string) => (url === '/src/app.css?direct' ? { code: '.pt-6 { padding-top: 24; }' } : null)) });
+		appCssStateModule.setAppCssState(ctx.server as any, { path: '/proj/src/app.css', deps: new Set<string>([file]), refresh: vi.fn(async () => ({ changed: true, changedSinceStartup: true })) } as any);
+
+		const result = await runHotUpdatePrologue(ctx, deps);
+
+		expect(result?.deferredCssUpdates?.[0]).toMatchObject({ path: '/src/app.css', cssText: '.pt-6 { padding-top: 24; }' });
+	});
+
+	it('does not compile the stylesheet for a content-file edit that leaves the Tailwind output unchanged', async () => {
+		const file = '/proj/src/app/listen-now.component.ts';
+		const deps = makeDeps({ wss: { clients: new Set<FakeClient>([{ readyState: 1, send: vi.fn() }]) } as any, getHmrSourceRootsCached: () => ['/proj/src'] });
+		const ctx = makeCtx(file);
+		appCssStateModule.setAppCssState(ctx.server as any, { path: '/proj/src/app.css', deps: new Set<string>([file]), refresh: vi.fn(async () => ({ changed: false, changedSinceStartup: false })) } as any);
+
+		await runHotUpdatePrologue(ctx, deps);
+
+		expect(ctx.server.transformRequest).not.toHaveBeenCalledWith(expect.stringMatching(/app\.css\?(direct|inline)$/));
 	});
 
 	it('broadcasts an ns:hmr-pending message to open clients for in-scope changes', async () => {

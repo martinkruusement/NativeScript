@@ -2,7 +2,7 @@ import type { ViteDevServer } from 'vite';
 import type { WebSocketServer } from 'ws';
 import * as path from 'path';
 import { getAppCssState } from '../../helpers/app-css-state.js';
-import { appCssRootRelPath, buildCssUpdateItem, buildCssUpdatesMessage } from './css-update-message.js';
+import { appCssRootRelPath, buildCssUpdateItem, buildCssUpdatesMessage, loadCssUpdateText } from './css-update-message.js';
 import type { CssUpdateItem } from '../shared/protocol.js';
 
 export interface ContentCssUpdateOptions {
@@ -77,7 +77,8 @@ export async function processContentCssUpdate(opts: ContentCssUpdateOptions): Pr
 	if (!appCssRel) {
 		return none;
 	}
-	const update = buildCssUpdateItem(appCssRel);
+	const cssText = await loadCssUpdateText(server, appCssRel, { verbose });
+	const update = buildCssUpdateItem(appCssRel, { cssText });
 
 	if (deferToFrameworkUpdate) {
 		if (verbose) console.info(`[ns-hmr][server] Tailwind/PostCSS output changed after ${path.basename(file)}; deferred ${appCssRel} to framework update`);

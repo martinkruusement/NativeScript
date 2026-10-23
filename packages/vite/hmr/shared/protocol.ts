@@ -39,6 +39,12 @@ export interface CssUpdateItem {
 	 * independently of `app.css`.
 	 */
 	tag?: string;
+	/**
+	 * The compiled stylesheet, applied by the client as is. Omitted when the
+	 * server could not compile it (and by older servers); the client then
+	 * fetches `<origin><path>?direct=1` instead.
+	 */
+	cssText?: string;
 }
 
 /** A single Vue SFC registry entry carried inside `ns:vue-sfc-registry`. */

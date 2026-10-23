@@ -141,7 +141,7 @@ export function mainEntryPlugin(opts: { platform: 'ios' | 'android' | 'visionos'
 		// We ALSO stash the resolved dep set on the server itself so
 		// the HMR websocket handler can recognize when a non-CSS edit
 		// (e.g. a `.html` template or `.ts` file scanned by Tailwind's
-		// content config) should trigger a fresh `app.css` fetch. The
+		// content config) should trigger a fresh `app.css` update. The
 		// `preprocessCSS` deps include every file PostCSS reported as
 		// a `dependency` message — for Tailwind 3 with content globs,
 		// Vite's `compileCSS` expands the `dir-dependency` glob into

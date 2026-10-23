@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { APP_CSS_TAG, applyCssText } from './css-handler.js';
+import { APP_CSS_TAG, CSS_FETCH_TIMEOUT_MS, applyCssText, fetchText, handleCssUpdates } from './css-handler.js';
 import { getGlobalScope } from '../shared/runtime/global-scope.js';
 
 describe('css-handler', () => {
@@ -126,5 +126,138 @@ describe('css-handler', () => {
 
 		expect(addCss).not.toHaveBeenCalled();
 		expect(addTaggedAdditionalCSS).not.toHaveBeenCalled();
+	});
+});
+
+describe('handleCssUpdates', () => {
+	let addTaggedAdditionalCSS: ReturnType<typeof vi.fn>;
+	let removeTaggedAdditionalCSS: ReturnType<typeof vi.fn>;
+	let fetchMock: ReturnType<typeof vi.fn>;
+
+	beforeEach(() => {
+		delete getGlobalScope().__NS_HMR_APPLY_CSS__;
+		delete getGlobalScope().__nsVendorRegistry;
+		delete getGlobalScope().Http;
+		addTaggedAdditionalCSS = vi.fn(() => true);
+		removeTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().Application = { addCss: vi.fn(), getRootView: vi.fn(() => null) };
+		getGlobalScope().addTaggedAdditionalCSS = addTaggedAdditionalCSS;
+		getGlobalScope().removeTaggedAdditionalCSS = removeTaggedAdditionalCSS;
+		fetchMock = vi.fn(async () => ({ text: async () => '.fetched { color: green; }' }));
+		vi.stubGlobal('fetch', fetchMock);
+	});
+
+	afterEach(() => {
+		delete getGlobalScope().Application;
+		delete getGlobalScope().Http;
+		delete getGlobalScope().addTaggedAdditionalCSS;
+		delete getGlobalScope().removeTaggedAdditionalCSS;
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+	});
+
+	it('applies the css carried by the update without fetching', async () => {
+		const getString = vi.fn();
+		getGlobalScope().Http = { getString };
+
+		await handleCssUpdates([{ type: 'css-update', path: '/src/app.css', acceptedPath: '/src/app.css', timestamp: 1, cssText: '.a { color: red; }' }], 'http://test:5173');
+
+		expect(addTaggedAdditionalCSS).toHaveBeenCalledWith('.a { color: red; }', APP_CSS_TAG);
+		expect(getString).not.toHaveBeenCalled();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('applies carried css under the update tag, even without an http origin', async () => {
+		const tag = '/src/app/header/header.component.css';
+
+		await handleCssUpdates([{ type: 'css-update', path: tag, acceptedPath: tag, timestamp: 1, tag, cssText: '.h { color: blue; }' }], '');
+
+		expect(removeTaggedAdditionalCSS).toHaveBeenCalledWith(tag);
+		expect(addTaggedAdditionalCSS).toHaveBeenCalledWith('.h { color: blue; }', tag);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('neither fetches nor applies when the carried css is empty', async () => {
+		await handleCssUpdates([{ type: 'css-update', path: '/src/app.css', acceptedPath: '/src/app.css', timestamp: 1, cssText: '' }], 'http://test:5173');
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(addTaggedAdditionalCSS).not.toHaveBeenCalled();
+	});
+
+	it('fetches <origin><path>?direct=1&t=<timestamp> when the update carries no css (older server)', async () => {
+		const getString = vi.fn(async () => '.fetched { color: green; }');
+		getGlobalScope().Http = { getString };
+
+		await handleCssUpdates([{ type: 'css-update', path: '/src/app.css', acceptedPath: '/src/app.css', timestamp: 42 }], 'http://test:5173');
+
+		expect(getString).toHaveBeenCalledWith('http://test:5173/src/app.css?direct=1&t=42');
+		expect(addTaggedAdditionalCSS).toHaveBeenCalledWith('.fetched { color: green; }', APP_CSS_TAG);
+	});
+
+	it('skips an update without css when there is no http origin to fetch from', async () => {
+		await handleCssUpdates([{ type: 'css-update', path: '/src/app.css', acceptedPath: '/src/app.css', timestamp: 1 }], '');
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(addTaggedAdditionalCSS).not.toHaveBeenCalled();
+	});
+});
+
+describe('fetchText', () => {
+	afterEach(() => {
+		delete getGlobalScope().Http;
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+		vi.useRealTimers();
+	});
+
+	it('prefers core Http.getString over the global fetch', async () => {
+		const getString = vi.fn(async () => '.http {}');
+		const fetchMock = vi.fn();
+		getGlobalScope().Http = { getString };
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(await fetchText('http://test:5173/src/app.css?direct=1')).toBe('.http {}');
+		expect(getString).toHaveBeenCalledWith('http://test:5173/src/app.css?direct=1');
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('falls back to the global fetch when core Http is unavailable', async () => {
+		const fetchMock = vi.fn(async () => ({ text: async () => '.fetch {}' }));
+		vi.stubGlobal('fetch', fetchMock);
+
+		expect(await fetchText('http://test:5173/src/app.css?direct=1')).toBe('.fetch {}');
+		expect(fetchMock).toHaveBeenCalledWith('http://test:5173/src/app.css?direct=1');
+	});
+
+	it('returns an empty string and warns when the request fails', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		getGlobalScope().Http = { getString: vi.fn(async () => Promise.reject(new Error('offline'))) };
+
+		expect(await fetchText('http://test:5173/src/app.css?direct=1')).toBe('');
+		expect(warn).toHaveBeenCalledWith('[ns-hmr] Fetch failed:', 'offline');
+	});
+
+	it('abandons a request that never settles after CSS_FETCH_TIMEOUT_MS and warns', async () => {
+		vi.useFakeTimers();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		getGlobalScope().Http = { getString: vi.fn(() => new Promise<string>(() => {})) };
+		let settled: string | undefined;
+
+		const pending = fetchText('http://test:5173/src/app.css?direct=1').then((text) => (settled = text));
+		await vi.advanceTimersByTimeAsync(CSS_FETCH_TIMEOUT_MS - 1);
+		expect(settled).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(1);
+		await pending;
+
+		expect(settled).toBe('');
+		expect(warn).toHaveBeenCalledWith(`[ns-hmr] CSS fetch did not complete within ${CSS_FETCH_TIMEOUT_MS}ms: http://test:5173/src/app.css?direct=1`);
+	});
+
+	it('clears the timeout once the request settles', async () => {
+		vi.useFakeTimers();
+		getGlobalScope().Http = { getString: vi.fn(async () => '.http {}') };
+
+		expect(await fetchText('http://test:5173/src/app.css?direct=1')).toBe('.http {}');
+		expect(vi.getTimerCount()).toBe(0);
 	});
 });

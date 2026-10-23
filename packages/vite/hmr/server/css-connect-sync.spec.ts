@@ -54,6 +54,47 @@ describe('maybeSendConnectCssSync', () => {
 		expect(msg.updates[0]).toMatchObject({ type: 'css-update', path: '/src/app.css', acceptedPath: '/src/app.css' });
 	});
 
+	it('carries the compiled stylesheet in the connect-sync item', async () => {
+		const server = makeServer();
+		server.transformRequest = vi.fn(async (url: string) => (url === '/src/app.css?direct' ? { code: '.synced { color: red; }' } : null));
+		registerState(server);
+		const ws = makeSocket();
+
+		expect(await maybeSendConnectCssSync(server, ws)).toBe(true);
+
+		const msg = JSON.parse(String(ws.send.mock.calls[0][0]));
+		expect(msg.updates[0]).toMatchObject({ path: '/src/app.css', cssText: '.synced { color: red; }' });
+	});
+
+	it('omits cssText when the stylesheet cannot be compiled, so the client fetches it', async () => {
+		const server = makeServer();
+		server.transformRequest = vi.fn(async () => {
+			throw new Error('CssSyntaxError');
+		});
+		registerState(server);
+		const ws = makeSocket();
+
+		expect(await maybeSendConnectCssSync(server, ws)).toBe(true);
+
+		const msg = JSON.parse(String(ws.send.mock.calls[0][0]));
+		expect(msg.updates[0].path).toBe('/src/app.css');
+		expect(msg.updates[0]).not.toHaveProperty('cssText');
+	});
+
+	it('sends nothing when the socket closes while the stylesheet is compiled', async () => {
+		const server = makeServer();
+		const ws = makeSocket();
+		server.transformRequest = vi.fn(async () => {
+			ws.readyState = 3;
+			return { code: '.synced { color: red; }' };
+		});
+		registerState(server);
+
+		expect(await maybeSendConnectCssSync(server, ws)).toBe(false);
+		expect(server.transformRequest).toHaveBeenCalled();
+		expect(ws.send).not.toHaveBeenCalled();
+	});
+
 	it('sends nothing when the stylesheet has not drifted', async () => {
 		const server = makeServer();
 		registerState(server, { refresh: vi.fn(async () => ({ changed: false, changedSinceStartup: false })) });

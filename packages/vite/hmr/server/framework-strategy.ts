@@ -167,8 +167,9 @@ export interface FrameworkServerStrategy {
 	 * `handleHotUpdate` drives the in-place component update instead. For
 	 * Angular with Analog `liveReload` active this is essential: Analog emits
 	 * `angular:component-update` only while the css's `?direct` module is absent
-	 * from the graph, and the prologue's broadcast makes the device fetch
-	 * `…?direct=1`, which creates that module and flips Analog to its
+	 * from the graph, and compiling `…?direct` for the prologue's broadcast (the
+	 * server's `cssText` load, or the device's `…?direct=1` fetch fallback)
+	 * creates that module and flips Analog to its
 	 * (NativeScript-inert) Vite css-update branch on every subsequent edit. The
 	 * global app-entry CSS path is unaffected (it is not component-scoped).
 	 * Defaults to `false` (every flavor keeps the component-style broadcast).
