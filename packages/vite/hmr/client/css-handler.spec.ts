@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { APP_CSS_TAG, applyCssText } from './css-handler.js';
+import { APP_CSS_TAG, applyCssText, handleCssUpdates } from './css-handler.js';
 import { getGlobalScope } from '../shared/runtime/global-scope.js';
 
 describe('css-handler', () => {
@@ -16,6 +16,7 @@ describe('css-handler', () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.unstubAllGlobals();
 	});
 
 	it('prefers the HTTP-realm CSS applier when one is installed (used by HTTP-ESM cold boot)', () => {
@@ -118,13 +119,89 @@ describe('css-handler', () => {
 	it('skips empty CSS text', () => {
 		const addCss = vi.fn();
 		const addTaggedAdditionalCSS = vi.fn();
+		const removeTaggedAdditionalCSS = vi.fn();
 		getGlobalScope().Application = { addCss, getRootView: vi.fn(() => null) };
 		getGlobalScope().addTaggedAdditionalCSS = addTaggedAdditionalCSS;
-		getGlobalScope().removeTaggedAdditionalCSS = vi.fn();
+		getGlobalScope().removeTaggedAdditionalCSS = removeTaggedAdditionalCSS;
 
 		applyCssText('');
 
 		expect(addCss).not.toHaveBeenCalled();
 		expect(addTaggedAdditionalCSS).not.toHaveBeenCalled();
+		expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
+	});
+
+	it("drops a component tag's rules for empty CSS text and restyles", () => {
+		const onCssStateChange = vi.fn();
+		const realmApplier = vi.fn();
+		const addCss = vi.fn();
+		const addTaggedAdditionalCSS = vi.fn(() => true);
+		const removeTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().__NS_HMR_APPLY_CSS__ = realmApplier;
+		getGlobalScope().Application = { addCss, getRootView: vi.fn(() => ({ _onCssStateChange: onCssStateChange })) };
+		getGlobalScope().addTaggedAdditionalCSS = addTaggedAdditionalCSS;
+		getGlobalScope().removeTaggedAdditionalCSS = removeTaggedAdditionalCSS;
+
+		applyCssText('', 'sfc:/src/App.vue');
+
+		expect(removeTaggedAdditionalCSS).toHaveBeenCalledWith('sfc:/src/App.vue');
+		expect(addTaggedAdditionalCSS).not.toHaveBeenCalled();
+		expect(addCss).not.toHaveBeenCalled();
+		expect(realmApplier).not.toHaveBeenCalled();
+		expect(onCssStateChange).toHaveBeenCalled();
+	});
+
+	it('does not restyle for empty CSS text when the tag had no rules', () => {
+		const onCssStateChange = vi.fn();
+		const removeTaggedAdditionalCSS = vi.fn(() => false);
+		getGlobalScope().Application = { addCss: vi.fn(), getRootView: vi.fn(() => ({ _onCssStateChange: onCssStateChange })) };
+		getGlobalScope().addTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().removeTaggedAdditionalCSS = removeTaggedAdditionalCSS;
+
+		applyCssText('', 'sfc:/src/App.vue');
+
+		expect(removeTaggedAdditionalCSS).toHaveBeenCalledWith('sfc:/src/App.vue');
+		expect(onCssStateChange).not.toHaveBeenCalled();
+	});
+
+	it('never removes app.css for empty CSS text, even when tagged explicitly', () => {
+		const realmApplier = vi.fn();
+		const removeTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().__NS_HMR_APPLY_CSS__ = realmApplier;
+		getGlobalScope().Application = { addCss: vi.fn(), getRootView: vi.fn(() => null) };
+		getGlobalScope().addTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().removeTaggedAdditionalCSS = removeTaggedAdditionalCSS;
+
+		applyCssText('', APP_CSS_TAG);
+
+		expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
+		expect(realmApplier).not.toHaveBeenCalled();
+	});
+
+	it("ignores empty CSS text for a tag that is not an SFC's, such as an imported .css file", () => {
+		const onCssStateChange = vi.fn();
+		const removeTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().Application = { addCss: vi.fn(), getRootView: vi.fn(() => ({ _onCssStateChange: onCssStateChange })) };
+		getGlobalScope().addTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().removeTaggedAdditionalCSS = removeTaggedAdditionalCSS;
+
+		applyCssText('', '/src/styles/theme.css');
+
+		expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
+		expect(onCssStateChange).not.toHaveBeenCalled();
+	});
+
+	it('keeps a component tag when its fetched update comes back empty', async () => {
+		const removeTaggedAdditionalCSS = vi.fn(() => true);
+		const emptyFetch = vi.fn(async () => ({ text: async () => '' }));
+		vi.stubGlobal('fetch', emptyFetch);
+		getGlobalScope().Application = { addCss: vi.fn(), getRootView: vi.fn(() => null) };
+		getGlobalScope().addTaggedAdditionalCSS = vi.fn(() => true);
+		getGlobalScope().removeTaggedAdditionalCSS = removeTaggedAdditionalCSS;
+
+		await handleCssUpdates([{ path: '/src/app/header/header.component.css', tag: '/src/app/header/header.component.css' }], 'http://localhost:5173');
+
+		expect(emptyFetch).toHaveBeenCalled();
+		expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
 	});
 });

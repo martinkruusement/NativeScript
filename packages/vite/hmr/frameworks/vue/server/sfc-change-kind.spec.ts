@@ -81,6 +81,59 @@ describe('classifySfcChange', () => {
 	});
 });
 
+describe('classifySfcChange with <style> blocks', () => {
+	const withStyle = (style: string) => `<template><StackLayout><slot /></StackLayout></template>\n<script setup lang="ts">const color = 'red';</script>\n${style}`;
+
+	async function classifyEdit(before: string, after: string): Promise<string> {
+		const store: SfcSignatureStore = new Map();
+		await classifySfcChange(FILE, withStyle(before), FILE, store);
+		return classifySfcChange(FILE, withStyle(after), FILE, store);
+	}
+
+	it('is render-only when only the content of a plain or scoped block changed', async () => {
+		expect(await classifyEdit('<style scoped>.a { color: red; }</style>', '<style scoped>.a { color: blue; }</style>')).toBe('render-only');
+		expect(await classifyEdit('<style lang="scss">.a { color: red; }</style>', '<style lang="scss">.a { .b { color: blue; } }</style>')).toBe('render-only');
+	});
+
+	it('is full when the component gains or loses its scoped styles', async () => {
+		expect(await classifyEdit('<style>.a { color: red; }</style>', '<style scoped>.a { color: red; }</style>')).toBe('full');
+		expect(await classifyEdit('<style scoped>.a { color: red; }</style>', '<style>.a { color: red; }</style>')).toBe('full');
+		expect(await classifyEdit('', '<style scoped>.a { color: red; }</style>')).toBe('full');
+	});
+
+	it('is full when a v-bind() is added or changed, render-only for other edits around it', async () => {
+		expect(await classifyEdit('<style>.a { color: red; }</style>', '<style>.a { color: v-bind(color); }</style>')).toBe('full');
+		expect(await classifyEdit('<style>.a { color: v-bind(color); }</style>', '<style>.a { background-color: v-bind(color); }</style>')).toBe('render-only');
+	});
+
+	it('is full when a <style module> block is added or changes its name or content', async () => {
+		expect(await classifyEdit('<style>.a { color: red; }</style>', '<style module>.a { color: red; }</style>')).toBe('full');
+		expect(await classifyEdit('<style module>.a { color: red; }</style>', '<style module>.b { color: red; }</style>')).toBe('full');
+		expect(await classifyEdit('<style module>.a { color: red; }</style>', '<style module="classes">.a { color: red; }</style>')).toBe('full');
+	});
+
+	it('is full when the first :slotted() rule of a scoped block is added or the last removed', async () => {
+		const own = '.own { color: red; }';
+		expect(await classifyEdit(`<style scoped>${own}</style>`, `<style scoped>${own} :slotted(.item) { color: blue; }</style>`)).toBe('full');
+		expect(await classifyEdit(`<style scoped>${own}</style>`, `<style scoped>${own} ::v-slotted(.item) { color: blue; }</style>`)).toBe('full');
+		expect(await classifyEdit(`<style scoped>${own} :slotted(.item) { color: blue; }</style>`, `<style scoped>${own}</style>`)).toBe('full');
+	});
+
+	it('is render-only when an existing :slotted() rule is edited', async () => {
+		expect(await classifyEdit('<style scoped>:slotted(.item) { color: blue; }</style>', '<style scoped>:slotted(.item) { color: green; }</style>')).toBe('render-only');
+	});
+
+	it('is render-only when :slotted() is added to an unscoped block', async () => {
+		expect(await classifyEdit('<style>.own { color: red; }</style>', '<style>.own { color: red; } :slotted(.item) { color: blue; }</style>')).toBe('render-only');
+	});
+
+	it('is render-only when a block is added or its lang changes without touching the definition', async () => {
+		expect(await classifyEdit('', '<style>.a { color: red; }</style>')).toBe('render-only');
+		expect(await classifyEdit('<style scoped>.a { color: red; }</style>', '<style scoped>.a { color: red; }</style>\n<style scoped>.b { color: red; }</style>')).toBe('render-only');
+		expect(await classifyEdit('<style>.a { color: red; }</style>', '<style lang="scss">.a { color: red; }</style>')).toBe('render-only');
+	});
+});
+
 describe('seedSfcSignature', () => {
 	it('lets the first edit of a session be classified', async () => {
 		const store: SfcSignatureStore = new Map();

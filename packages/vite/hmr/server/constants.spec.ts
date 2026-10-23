@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { EXPORT_PATTERN, IMPORT_PATTERN_1, IMPORT_PATTERN_2, IMPORT_PATTERN_3, IMPORT_PATTERN_SIDE_EFFECT } from './constants.js';
+import { EXPORT_PATTERN, IMPORT_PATTERN_1, IMPORT_PATTERN_2, IMPORT_PATTERN_3, IMPORT_PATTERN_SIDE_EFFECT, VUE_STYLE_IMPORTS } from './constants.js';
 
 const replacePassthrough = (_match: string, prefix: string, spec: string, suffix: string) => `${prefix}${spec.toUpperCase()}${suffix}`;
 
@@ -76,5 +76,21 @@ describe('IMPORT/EXPORT regex patterns', () => {
 			const out = input.replace(IMPORT_PATTERN_3, replacePassthrough);
 			expect(out).toBe(`await import("A");\nawait import("B");\n`);
 		});
+	});
+});
+
+describe('VUE_STYLE_IMPORTS', () => {
+	it('strips the style sub-requests @vitejs/plugin-vue emits', () => {
+		const input = ['import { defineComponent } from "/ns/rt";', 'import "/src/App.vue?vue&type=style&index=0&scoped=7ba5bd90&lang.css";', 'import "/src/App.vue?vue&type=style&index=1&lang.scss";', 'const keep = 1;'].join('\n');
+		expect(input.replace(VUE_STYLE_IMPORTS, '')).toBe('import { defineComponent } from "/ns/rt";\nconst keep = 1;');
+	});
+
+	it('still strips the bare `?type=style` form', () => {
+		expect('import "./App.vue?type=style&lang.css";\nconst keep = 1;'.replace(VUE_STYLE_IMPORTS, '')).toBe('\nconst keep = 1;');
+	});
+
+	it('keeps script and template variants and css module bindings', () => {
+		const input = ['import script from "/src/App.vue?vue&type=script&setup=true&lang.ts";', 'import { render } from "/src/App.vue?vue&type=template&lang.js";', 'import style1 from "/src/App.vue?vue&type=style&index=1&lang.module.css";'].join('\n');
+		expect(input.replace(VUE_STYLE_IMPORTS, '')).toBe(input);
 	});
 });

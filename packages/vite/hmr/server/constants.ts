@@ -45,6 +45,7 @@ export const IMPORT_META_HOT_ASSIGNMENT = /\bimport\.meta\.hot\s*=\s*[^;\n]+;?/g
 export const IMPORT_META_HOT_CALLS = /(?:^|\n)\s*import\.meta\.hot\.[A-Za-z_$][\w$]*\([^)]*\);?\s*/g;
 
 // Remove only Vue style virtual imports; keep script/template variants
-export const VUE_STYLE_IMPORTS = /(?:^|\n)\s*import\s+['"][^'"\n]*\.vue\?type=style[^'"\n]*['"];?/g;
+// @vitejs/plugin-vue emits `.vue?vue&type=style&index=N…`.
+export const VUE_STYLE_IMPORTS = /(?:^|\n)\s*import\s+['"][^'"\n]*\.vue\?(?:vue&)?type=style[^'"\n]*['"];?/g;
 export const VUE_EXPORT_SFC_IMPORT = /(?:^|\n)\s*import\s+[^;\n]*__vite-plugin-vue_export-helper[^;\n]*;?/g;
 export const VUE_VIRTUAL_ID_IMPORT = /(?:^|\n)\s*import\s+[^;\n]*\/@id\/[^'"\n]*;?/g;

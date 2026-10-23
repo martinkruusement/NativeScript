@@ -1,8 +1,11 @@
-import type { ViteDevServer } from 'vite';
+import type { TransformResult, ViteDevServer } from 'vite';
 import { createHash } from 'crypto';
+import { readFileSync } from 'fs';
+import * as path from 'path';
 
 import { extractExportMetadata } from '../../../server/websocket-served-module-helpers.js';
 import type { RegisterSfcHandlersOptions } from './sfc-route-shared.js';
+import { parse, resolveSfcDescriptorId } from './sfc-route-shared.js';
 
 /**
  * Registers `GET /ns/sfc-meta` — JSON metadata (script exports, render presence,
@@ -39,8 +42,35 @@ export function registerSfcMetaRoute(server: ViteDevServer, options: RegisterSfc
 			if (spec.startsWith('@/')) spec = options.appVirtualWithSlash + spec.slice(2);
 			if (!spec.startsWith('/')) spec = '/' + spec;
 			const base = spec.replace(/[?#].*$/, '');
-			// Transform variants to inspect exports
-			const [scriptR, templateR] = await Promise.all([server.transformRequest(base + '?vue&type=script'), server.transformRequest(base + '?vue&type=template')]);
+			// Inspect the variants' exports. An SFC without <script> has none.
+			const safeTransform = async (candidate: string): Promise<TransformResult | null> => {
+				try {
+					return await server.transformRequest(candidate);
+				} catch {
+					return null;
+				}
+			};
+			const [scriptR, templateR] = await Promise.all([safeTransform(base + '?vue&type=script'), safeTransform(base + '?vue&type=template')]);
+			let styleMeta = { hasStyle: false, styleCount: 0, scoped: false, slotted: false, cssModules: false, cssVars: [] as string[], scopeId: null as string | null };
+			try {
+				const abs = path.join(server.config?.root || process.cwd(), base.replace(/^\//, ''));
+				const source = readFileSync(abs, 'utf-8');
+				const { descriptor } = parse(source, { filename: abs });
+				// `<style src>` blocks have no inline content.
+				const styles = descriptor.styles.filter((s) => s.src || s.content.trim());
+				const mainR = await safeTransform(base);
+				styleMeta = {
+					hasStyle: styles.length > 0,
+					styleCount: styles.length,
+					scoped: styles.some((s) => s.scoped),
+					slotted: descriptor.slotted,
+					cssModules: styles.some((s) => s.module),
+					cssVars: descriptor.cssVars,
+					scopeId: resolveSfcDescriptorId({ server, abs, mainCode: mainR?.code, source }),
+				};
+			} catch (eStyle: any) {
+				if (options.verbose) console.warn('[sfc-meta] style inspection failed for', base, eStyle?.message || String(eStyle));
+			}
 			const scriptCode = scriptR?.code || '';
 			const templateCode = templateR?.code || '';
 			const scriptMeta = extractExportMetadata(scriptCode);
@@ -62,7 +92,7 @@ export function registerSfcMetaRoute(server: ViteDevServer, options: RegisterSfc
 				path: base,
 				hasScript: !!scriptCode,
 				hasTemplate: !!templateCode,
-				hasStyle: false,
+				...styleMeta,
 				scriptExports: scriptMeta.named,
 				scriptHasDefault: scriptMeta.hasDefault,
 				templateHasRender: hasRender,

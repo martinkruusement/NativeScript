@@ -14,6 +14,7 @@ import { createAppCssRefresher } from './app-css-refresh.js';
 import { rewritePlatformCssImports } from './css-platform-plugin.js';
 import { buildGlobalSeedStatements, getRuntimeSeedValues } from './global-defines.js';
 import { BUNDLE_CSS_AST_SENTINEL, inlineBundleCss } from './bundle-css.js';
+import { renameDigitTerminatedScopedKeyframes } from '../hmr/server/css-device-module.js';
 // Switched to runtime modules to avoid fragile string injection and enable TS checks
 const projectRoot = getProjectRootPath();
 const appRootDir = getProjectAppPath();
@@ -122,7 +123,8 @@ export function mainEntryPlugin(opts: { platform: 'ios' | 'android' | 'visionos'
 			if (opts.hmrActive) return;
 			try {
 				// Rework AST, position-stripped (the form app.css uses; ~halves size).
-				const result = inlineBundleCss(bundle, (cssText) => JSON.stringify(parseCssToAst(cssText, { silent: true }), (key, value) => (key === 'position' ? undefined : value)));
+				// Vue scoped keyframes ending in a digit break core's animation shorthand.
+				const result = inlineBundleCss(bundle, (cssText) => JSON.stringify(parseCssToAst(effectiveFlavor === 'vue' ? renameDigitTerminatedScopedKeyframes(cssText) : cssText, { silent: true }), (key, value) => (key === 'position' ? undefined : value)));
 				if (opts.verbose) {
 					console.info(`[ns-entry] bundle CSS: ${result.assetCount} asset(s), ${result.bytes} bytes, applied=${result.replaced}`);
 				}

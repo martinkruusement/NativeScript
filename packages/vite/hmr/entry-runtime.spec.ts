@@ -10,6 +10,8 @@ describe('installHttpCoreCssSupport', () => {
 		delete getGlobalScope().__NS_HMR_HTTP_APP_CSS_APPLIED__;
 		delete getGlobalScope().addTaggedAdditionalCSS;
 		delete getGlobalScope().removeTaggedAdditionalCSS;
+		delete getGlobalScope().__NS_REGISTER_CSS__;
+		delete getGlobalScope().__NS_HMR_BOOT_COMPLETE__;
 	});
 
 	afterEach(() => {
@@ -85,6 +87,72 @@ describe('installHttpCoreCssSupport', () => {
 		expect(addCss).not.toHaveBeenCalled();
 		expect(addTaggedAdditionalCSS).not.toHaveBeenCalled();
 		expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
+	});
+
+	describe('__NS_REGISTER_CSS__', () => {
+		const TAG = 'sfc:/src/App.vue';
+
+		function install(removed: boolean) {
+			const onCssStateChange = vi.fn();
+			const addTaggedAdditionalCSS = vi.fn(() => true);
+			const removeTaggedAdditionalCSS = vi.fn(() => removed);
+			const Application = { addCss: vi.fn(), getRootView: vi.fn(() => ({ _onCssStateChange: onCssStateChange })) };
+			installHttpCoreCssSupport({ Application, addTaggedAdditionalCSS, removeTaggedAdditionalCSS });
+			getGlobalScope().__NS_HMR_BOOT_COMPLETE__ = true;
+			return { register: getGlobalScope().__NS_REGISTER_CSS__!, addTaggedAdditionalCSS, removeTaggedAdditionalCSS, onCssStateChange, addCss: Application.addCss };
+		}
+
+		it('replaces a tag through the tagged remove + add pair and restyles after boot', () => {
+			const { register, addTaggedAdditionalCSS, removeTaggedAdditionalCSS, onCssStateChange } = install(true);
+			register(TAG, '.a { color: red; }');
+			expect(removeTaggedAdditionalCSS).toHaveBeenCalledWith(TAG);
+			expect(addTaggedAdditionalCSS).toHaveBeenCalledWith('.a { color: red; }', TAG);
+			expect(onCssStateChange).toHaveBeenCalled();
+		});
+
+		it("drops a component tag's rules for '' and restyles", () => {
+			const { register, addTaggedAdditionalCSS, removeTaggedAdditionalCSS, onCssStateChange, addCss } = install(true);
+			register(TAG, '');
+			expect(removeTaggedAdditionalCSS).toHaveBeenCalledWith(TAG);
+			expect(addTaggedAdditionalCSS).not.toHaveBeenCalled();
+			expect(addCss).not.toHaveBeenCalled();
+			expect(onCssStateChange).toHaveBeenCalled();
+		});
+
+		it("does not restyle for '' when the tag had no rules", () => {
+			const { register, removeTaggedAdditionalCSS, onCssStateChange } = install(false);
+			register(TAG, '');
+			expect(removeTaggedAdditionalCSS).toHaveBeenCalledWith(TAG);
+			expect(onCssStateChange).not.toHaveBeenCalled();
+		});
+
+		it("never drops app.css for ''", () => {
+			const { register, removeTaggedAdditionalCSS, onCssStateChange } = install(true);
+			register(APP_CSS_TAG, '');
+			expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
+			expect(onCssStateChange).not.toHaveBeenCalled();
+		});
+
+		it("ignores '' for a tag that is not an SFC's, such as an imported .css file", () => {
+			const { register, removeTaggedAdditionalCSS, onCssStateChange } = install(true);
+			register('/src/styles/theme.css', '');
+			expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
+			expect(onCssStateChange).not.toHaveBeenCalled();
+		});
+
+		it('ignores a non-string css value', () => {
+			const { register, removeTaggedAdditionalCSS } = install(true);
+			register(TAG, undefined as any);
+			expect(removeTaggedAdditionalCSS).not.toHaveBeenCalled();
+		});
+
+		it("drops a tag queued with '' before the applier was installed", () => {
+			const removeTaggedAdditionalCSS = vi.fn(() => true);
+			getGlobalScope().__NS_PENDING_CSS__ = { [TAG]: '' };
+			installHttpCoreCssSupport({ Application: { addCss: vi.fn(), getRootView: vi.fn(() => null) }, addTaggedAdditionalCSS: vi.fn(() => true), removeTaggedAdditionalCSS });
+			expect(removeTaggedAdditionalCSS).toHaveBeenCalledWith(TAG);
+			expect(getGlobalScope().__NS_PENDING_CSS__).toBeNull();
+		});
 	});
 
 	it('returns null when the coreModule does not expose Application.addCss', () => {

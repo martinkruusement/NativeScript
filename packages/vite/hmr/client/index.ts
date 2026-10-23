@@ -73,7 +73,8 @@ function installCssRegister(): void {
 		return;
 	}
 	const apply = (tag: string, cssText: string) => {
-		if (typeof cssText !== 'string' || !cssText.length) {
+		// '' reaches applyCssText, which drops the tag's rules.
+		if (typeof cssText !== 'string') {
 			return;
 		}
 		try {

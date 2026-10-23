@@ -9,6 +9,9 @@ const VERBOSE = !!getGlobalScope().__NS_ENV_VERBOSE__;
 // remove/add pair replaces the boot-time selectors instead of stacking.
 export const APP_CSS_TAG = 'app.css';
 
+// Vue SFC style tags (`/ns/asm`), the only source that unregisters with ''.
+const SFC_CSS_TAG_PREFIX = 'sfc:';
+
 function getPreferredCssApplier(): ((cssText: string, refreshRoot?: boolean) => void) | null {
 	try {
 		const applier = getGlobalScope().__NS_HMR_APPLY_CSS__;
@@ -33,6 +36,16 @@ function resolveTaggedCssApi(): TaggedCssApi {
 	return {};
 }
 
+function removeTaggedCss(tag: string): void {
+	try {
+		if (!resolveTaggedCssApi().remove?.(tag)) return;
+		if (VERBOSE) console.info(`[ns-hmr] CSS removed (tag=${tag})`);
+		restyleRootAndModals(getCore('Application')?.getRootView?.());
+	} catch (e) {
+		console.warn('[ns-hmr] CSS remove failed:', e?.message || String(e));
+	}
+}
+
 // CSS helper: apply CSS and refresh the current page so new styles render.
 //
 // `tag` scopes the remove+add tagged pair. It defaults to {@link APP_CSS_TAG}
@@ -41,7 +54,12 @@ function resolveTaggedCssApi(): TaggedCssApi {
 // component's rules replace independently — applying a component's CSS under
 // the shared `app.css` tag would otherwise wipe the global stylesheet.
 export function applyCssText(cssText: string, tag: string = APP_CSS_TAG): void {
-	if (typeof cssText !== 'string' || !cssText.length) return;
+	if (typeof cssText !== 'string') return;
+	if (!cssText.length) {
+		// '' drops an SFC's rules; other tags ignore it.
+		if (String(tag).startsWith(SFC_CSS_TAG_PREFIX)) removeTaggedCss(tag);
+		return;
+	}
 
 	try {
 		// The HTTP-core-realm applier (entry-runtime's `__NS_HMR_APPLY_CSS__`)

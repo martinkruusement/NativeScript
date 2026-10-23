@@ -19,7 +19,7 @@ import { REQUIRE_GUARD_SNIPPET } from '../../../server/require-guard.js';
 import { getServerOrigin } from '../../../server/server-origin.js';
 import { resolveProjectTsAliasRelative } from '../../../../helpers/ts-config-paths.js';
 import type { RegisterSfcHandlersOptions } from './sfc-route-shared.js';
-import { babelTraverse, canonicalizeNsMAppImports, compileScript, compileTemplate, parse, pluginTransformTypescript } from './sfc-route-shared.js';
+import { babelTraverse, canonicalizeNsMAppImports, compileScript, compileSfcStyles, compileTemplate, parse, pluginTransformTypescript } from './sfc-route-shared.js';
 
 /**
  * Registers `GET /ns/sfc` — serves SFC modules. Full SFCs delegate to the `/ns/asm`
@@ -85,6 +85,34 @@ export function registerSfcServeRoute(server: ViteDevServer, options: RegisterSf
 			const variantType = variantTypeMatch?.[1] || null;
 			const isStyleVariant = /[?&]type=style\b/.test(fullSpec);
 
+			// Inspection only: /ns/asm registers the SFC's styles as a whole.
+			if (isStyleVariant) {
+				const basePath = fullSpec.replace(/[?#].*$/, '');
+				const index = Number(/[?&]index=(\d+)/.exec(fullSpec)?.[1] || 0);
+				const projectRootStyle = server.config?.root || process.cwd();
+				let css = '';
+				let scopeId = '';
+				let scoped = false;
+				try {
+					const abs = path.join(projectRootStyle, basePath.replace(/^\//, ''));
+					const { descriptor } = parse(readFileSync(abs, 'utf-8'), { filename: abs });
+					let mainCode = '';
+					try {
+						mainCode = (await server.transformRequest(basePath))?.code || '';
+					} catch {}
+					const compiled = await compileSfcStyles({ server, descriptor, base: basePath, abs, projectRoot: projectRootStyle, appVirtualWithSlash: options.appVirtualWithSlash, mainCode, verbose: !!options.verbose, onlyIndex: index });
+					css = compiled.css;
+					scopeId = compiled.scopeId;
+					scoped = !!descriptor.styles[index]?.scoped;
+				} catch (eStyle: any) {
+					if (options.verbose) console.warn('[sfc][serve][style] compile failed', fullSpec, eStyle?.message || String(eStyle));
+				}
+				const sig = `// [sfc] kind=variant:style path=${fullSpec.replace(/\n/g, '')} index=${index} scoped=${scoped} scopeId=${scopeId} len=${css.length} default=true\n`;
+				res.statusCode = 200;
+				res.end(`${sig}export default ${JSON.stringify(css)};\n`);
+				return;
+			}
+
 			// Determine candidate for transformRequest
 			// For full SFCs we prefer a clean base path + '?vue'; if that fails, try base without query as fallback.
 			let candidate = fullSpec;
@@ -135,14 +163,6 @@ export function registerSfcServeRoute(server: ViteDevServer, options: RegisterSf
 						return;
 					}
 				}
-			}
-
-			// For style variants, return an empty module immediately
-			if (isStyleVariant) {
-				const sig = `// [sfc] kind=variant:style path=${fullSpec.replace(/\n/g, '')} len=0 default=false\n`;
-				res.statusCode = 200;
-				res.end(`${sig}export {}\n`);
-				return;
 			}
 
 			let code = transformed.code;

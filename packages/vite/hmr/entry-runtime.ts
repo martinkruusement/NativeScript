@@ -31,6 +31,9 @@ type TaggedCssApi = { add?: TaggedCssAdd; remove?: TaggedCssRemove };
 // boot-time selectors instead of stacking on top of them.
 export const APP_CSS_TAG = 'app.css';
 
+// Vue SFC style tags (`/ns/asm`), the only source that unregisters with ''.
+const SFC_CSS_TAG_PREFIX = 'sfc:';
+
 function resolveTaggedCssApi(coreModule: any): TaggedCssApi {
 	const candidates: any[] = [coreModule, coreModule?.default, globalThis];
 	for (const candidate of candidates) {
@@ -195,11 +198,16 @@ export function installHttpCoreCssSupport(coreModule: any, verbose?: boolean): H
 		// Device CSS applier for `.css` modules and component styles. Per-tag
 		// remove+add keeps each source independently replaceable on hot-update.
 		const registerCss = (tag: string, cssText: string) => {
-			if (typeof cssText !== 'string' || !cssText.length) {
+			if (typeof cssText !== 'string') {
 				return;
 			}
 			try {
-				if (taggedCss.add && taggedCss.remove) {
+				if (!cssText.length) {
+					// '' drops an SFC's rules; other tags ignore it.
+					if (!String(tag).startsWith(SFC_CSS_TAG_PREFIX) || !taggedCss.remove?.(tag)) {
+						return;
+					}
+				} else if (taggedCss.add && taggedCss.remove) {
 					taggedCss.remove(tag);
 					taggedCss.add(cssText, tag);
 				} else if (Application.addCss) {

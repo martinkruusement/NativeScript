@@ -40,7 +40,9 @@ function loadParseSfc(): Promise<ParseSfc | null> {
 /**
  * A stable fingerprint of everything that would change a component's behavior
  * rather than only its rendered output: both script blocks, their content and
- * the attributes that alter how they compile.
+ * the attributes that alter how they compile, plus what the `<style>` blocks put
+ * into the component definition (`__scopeId`, `__cssModules`, `v-bind()`
+ * variables, `:slotted()` stamping). Style content alone stays render-only.
  *
  * Returns `null` when the SFC cannot be parsed — an unparseable save is never
  * classified as render-only, because we cannot know what changed in it.
@@ -59,7 +61,11 @@ export async function sfcScriptSignature(source: string, filename: string): Prom
 			// `lang` and `setup` change the compiled output for identical text.
 			return { lang: block.lang ?? '', setup: !!(block as { setup?: unknown }).setup, content: block.content };
 		});
-		return JSON.stringify(blocks);
+		// A rerender keeps the old `__cssModules` class map.
+		const cssModules = descriptor.styles.filter((block) => block.module).map((block) => ({ module: block.module, lang: block.lang ?? '', src: block.src ?? '', content: block.content }));
+		const scoped = descriptor.styles.some((block) => block.scoped);
+		// Slot content is stamped for `:slotted()` only while it mounts.
+		return JSON.stringify({ blocks, scoped, cssModules, slotted: descriptor.slotted, cssVars: descriptor.cssVars });
 	} catch {
 		return null;
 	}

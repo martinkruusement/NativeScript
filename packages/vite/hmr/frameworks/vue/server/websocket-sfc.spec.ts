@@ -99,14 +99,14 @@ describe('registerSfcHandlers', () => {
 			expect(res.body).toContain(`export * from "/ns/asm?path=${encodeURIComponent('/src/pages/[id].vue')}";`);
 		});
 
-		it('returns an empty module for style variants', async () => {
+		it('serves style variants as a css string module (empty when the SFC cannot be read)', async () => {
 			const { sfc, transformRequest } = mount();
 			transformRequest.mockResolvedValue({ code: '/* css */' });
 			const res = makeRes();
 			await sfc({ url: '/ns/sfc?path=' + encodeURIComponent('/src/App.vue?vue&type=style') }, res, vi.fn());
 			expect(res.statusCode).toBe(200);
 			expect(res.body).toContain('kind=variant:style');
-			expect(res.body).toContain('export {}');
+			expect(res.body).toContain('export default "";');
 		});
 	});
 

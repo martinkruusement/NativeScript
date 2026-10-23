@@ -16,8 +16,8 @@ import { REQUIRE_GUARD_SNIPPET } from '../../../server/require-guard.js';
 import { getServerOrigin } from '../../../server/server-origin.js';
 import { resolveProjectTsAliasRelative } from '../../../../helpers/ts-config-paths.js';
 import type { RegisterSfcHandlersOptions } from './sfc-route-shared.js';
-import { canonicalizeNsMAppImports, compileScript, compileSfcStylesToCss, compileTemplate, parse, pluginTransformTypescript } from './sfc-route-shared.js';
-import { buildCssRegisterSnippet } from '../../../server/css-device-module.js';
+import { canonicalizeNsMAppImports, compileScript, compileSfcStyles, compileTemplate, isProductionCompile, parse, pluginTransformTypescript, resolveSfcDescriptorId } from './sfc-route-shared.js';
+import { buildCssRegisterSnippet, buildCssUnregisterSnippet } from '../../../server/css-device-module.js';
 
 // Cache assembled SFC modules keyed on `base | source-content-hash`.
 // The source hash in the key means a changed SFC always produces a new key —
@@ -33,6 +33,11 @@ function setAsmCache(key: string, value: string): void {
 		const oldest = sfcAsmCache.keys().next().value;
 		if (oldest !== undefined) sfcAsmCache.delete(oldest);
 	}
+}
+
+// Attached like `__hmrId`, so the Vue-HMR strip passes leave them alone.
+function buildComponentPropertySnippet(name: string, value: unknown): string {
+	return `\n;try{ if (typeof __ns_sfc__ !== 'undefined' && __ns_sfc__) __ns_sfc__[${JSON.stringify(name)}] = ${JSON.stringify(value)}; }catch(__e){}\n`;
 }
 
 /**
@@ -87,9 +92,8 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 			};
 			const scriptR = await safeTransform(base + '?vue&type=script');
 			const templateR = await safeTransform(base + '?vue&type=template');
-			// Warm Vite's transform cache for the full-SFC URL; result is unused (the
-			// assembler reads the SFC from disk and compiles it inline below).
-			await safeTransform(base + '?vue');
+			// plugin-vue's main transform: fills its descriptor cache, emits the id in `__hmrId`.
+			const mainR = await safeTransform(base);
 			const origin = getServerOrigin(server);
 			// All URLs minted into the assembled module are CANONICAL
 			// (unversioned): module identity is the URL. Freshness comes from
@@ -100,6 +104,9 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 			// Compiled SFC <style> registration snippet, shared by the canonical and
 			// fallback emit paths below. Populated once the descriptor is parsed.
 			let sfcCssSnippet = '';
+			// `__scopeId` and `__cssModules` attach snippets, built with the css one.
+			let sfcScopeSnippet = '';
+			let sfcModulesSnippet = '';
 			// Stamps a stable, path-based `__hmrId` on the component so Vue's
 			// registerHMR auto-creates a record at mount — enabling in-place
 			// `__VUE_HMR_RUNTIME__.reload` on edit (preserves the App.vue shell /
@@ -129,18 +136,28 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 						return;
 					}
 					const { descriptor } = parse(sfcSrc, { filename: abs });
+					// Styles are scoped with plugin-vue's descriptor id; script and template must match.
+					const id = resolveSfcDescriptorId({ server, abs, mainCode: mainR?.code, source: sfcSrc });
+					const hasScopedStyle = descriptor.styles.some((s) => s.scoped);
+					const isProd = isProductionCompile(server);
 					// Compile the SFC's <style> blocks and build the CSS-register snippet
 					// appended below (HMR otherwise drops <style scoped> — only app.css
 					// would apply).
 					try {
-						const sfcCss = await compileSfcStylesToCss(descriptor, abs, projectRoot, !!options.verbose);
-						sfcCssSnippet = buildCssRegisterSnippet('sfc:' + base, sfcCss);
+						const styleResult = await compileSfcStyles({ server, descriptor, base, abs, projectRoot, appVirtualWithSlash: options.appVirtualWithSlash, scopeId: id, verbose: !!options.verbose });
+						if (styleResult.css.trim()) {
+							sfcCssSnippet = buildCssRegisterSnippet('sfc:' + base, styleResult.css);
+						} else if (!styleResult.failed) {
+							// No rules left: drop the ones a previous version registered.
+							sfcCssSnippet = buildCssUnregisterSnippet('sfc:' + base);
+						}
+						if (hasScopedStyle) sfcScopeSnippet = buildComponentPropertySnippet('__scopeId', 'data-v-' + id);
+						if (styleResult.cssModules) sfcModulesSnippet = buildComponentPropertySnippet('__cssModules', styleResult.cssModules);
 					} catch (eCss) {
 						if (options.verbose) {
 							console.warn('[sfc-asm][style] failed', base, (eCss as any)?.message);
 						}
 					}
-					const id = createHash('md5').update(abs).digest('hex').slice(0, 8);
 					// 1) Compile script (prefer inlineTemplate for a complete module)
 					let compiledScript = '' as string;
 					let bindingMetadata: any = undefined;
@@ -154,6 +171,7 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 							descriptor as any,
 							{
 								id,
+								isProd,
 								inlineTemplate: true,
 								reactivityTransform: false,
 								// Pass only strict NS native element predicate; avoid broad PascalCase heuristic here.
@@ -172,6 +190,7 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 								descriptor as any,
 								{
 									id,
+									isProd,
 									inlineTemplate: false,
 									reactivityTransform: false,
 								} as any,
@@ -190,6 +209,7 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 								descriptor as any,
 								{
 									id,
+									isProd,
 									inlineTemplate: false,
 									reactivityTransform: false,
 								} as any,
@@ -218,6 +238,7 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 								descriptor as any,
 								{
 									id,
+									isProd,
 									inlineTemplate: false,
 									reactivityTransform: false,
 								} as any,
@@ -238,8 +259,11 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 							const ct: any = compileTemplate({
 								source: tplSrc,
 								id,
+								scoped: hasScopedStyle,
+								// compiler-core treats an omitted `slotted` as true.
+								slotted: !!descriptor.slotted,
 								filename: abs,
-								isProd: false,
+								isProd,
 								ssr: false,
 								compilerOptions: {
 									bindingMetadata,
@@ -666,6 +690,8 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 						// Apply the component's compiled <style> CSS at module eval.
 						if (sfcCssSnippet) inlineCode2 += sfcCssSnippet;
 						if (sfcHmrSnippet) inlineCode2 += sfcHmrSnippet;
+						if (sfcScopeSnippet) inlineCode2 += sfcScopeSnippet;
+						if (sfcModulesSnippet) inlineCode2 += sfcModulesSnippet;
 						if (asmCacheKey) setAsmCache(asmCacheKey, inlineCode2);
 						res.statusCode = 200;
 						res.end(inlineCode2);
@@ -690,12 +716,14 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 					const { descriptor } = parse(sfcSrc, { filename: abs });
 					const tpl = descriptor.template?.content || '';
 					if (tpl) {
-						const id = createHash('md5').update(abs).digest('hex').slice(0, 8);
+						const id = resolveSfcDescriptorId({ server, abs, mainCode: mainR?.code, source: sfcSrc });
 						const ct = compileTemplate({
 							source: tpl,
 							id,
+							scoped: descriptor.styles.some((s) => s.scoped),
+							slotted: !!descriptor.slotted,
 							filename: abs,
-							isProd: false,
+							isProd: isProductionCompile(server),
 							ssr: false,
 							compilerOptions: {
 								isCustomElement: (tag: string) => NS_NATIVE_TAGS.has(tag),
@@ -758,6 +786,8 @@ export function registerSfcAsmRoute(server: ViteDevServer, options: RegisterSfcH
 			// Apply the component's compiled <style> CSS at module eval.
 			if (sfcCssSnippet) code += sfcCssSnippet;
 			if (sfcHmrSnippet) code += sfcHmrSnippet;
+			if (sfcScopeSnippet) code += sfcScopeSnippet;
+			if (sfcModulesSnippet) code += sfcModulesSnippet;
 			if (asmCacheKey) setAsmCache(asmCacheKey, code);
 			res.statusCode = 200;
 			res.end(code);
