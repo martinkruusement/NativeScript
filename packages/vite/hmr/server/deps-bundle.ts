@@ -46,9 +46,11 @@
  *
  * FALLBACK
  * --------
- * A failed esbuild build logs once and falls back to per-module serving plus
- * the standalone vendor bundle for the session. Opt out entirely with
- * `NS_DEPS_PER_MODULE=1` (patch-package workflows editing node_modules).
+ * A build that fails with recorded entries is retried once without them (the
+ * vendor collection alone). A failed esbuild build logs once and falls back to
+ * per-module serving plus the standalone vendor bundle for the session. Opt
+ * out entirely with `NS_DEPS_PER_MODULE=1` (patch-package workflows editing
+ * node_modules).
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -1074,6 +1076,13 @@ export function createDepsBundleService(options: CreateDepsBundleServiceOptions)
 			// No recording is fine: the vendor collection seeds first-boot entries.
 			const recordedPaths = options.getRecordedPaths() ?? [];
 			building = generateDepsBundle({ ...options, recordedPaths })
+				.catch((error: any) => {
+					// A recorded file the bundle cannot take must not cost the app the
+					// bundle it gets from the vendor collection alone.
+					if (!resolveDepsEntriesFromRecording(recordedPaths, options.projectRoot, workspaceRoot, String(options.platform)).length) throw error;
+					console.warn(`[ns-deps-bundle] bundle build with the boot recording FAILED — retrying without it. Delete node_modules/.ns-vite/boot-closure-*.json if this repeats on every start. Error: ${error?.message || error}`);
+					return generateDepsBundle({ ...options, recordedPaths: [] });
+				})
 				.then((built) => {
 					state = built;
 					return built;

@@ -1,4 +1,4 @@
-import type { Plugin, ViteDevServer } from 'vite';
+import type { Connect, Plugin, ViteDevServer } from 'vite';
 import { readFileSync } from 'fs';
 import { WebSocketServer } from 'ws';
 import * as path from 'path';
@@ -502,7 +502,7 @@ function createHmrWebSocketPlugin(opts: { verbose?: boolean }, strategy: Framewo
 					if (verbose) console.info(line);
 				});
 			}
-			server.middlewares.use((req, res, next) => {
+			const bootTraceMiddleware: Connect.NextHandleFunction = (req, res, next) => {
 				try {
 					const urlObj = new URL(req.url || '', 'http://localhost');
 					// Boot recording sees every request first: the `/__ns_dev__/session`
@@ -529,7 +529,9 @@ function createHmrWebSocketPlugin(opts: { verbose?: boolean }, strategy: Framewo
 					} catch {}
 				} catch {}
 				next();
-			});
+			};
+			// Ahead of ns-hmr-client, which ends /__ns_dev__/session without next().
+			server.middlewares.stack.unshift({ route: '', handle: bootTraceMiddleware });
 
 			// Populate is started from the post hook returned below, not here.
 			// Disable via `NS_VITE_HMR_DISABLE_POPULATE=1` when profiling whether

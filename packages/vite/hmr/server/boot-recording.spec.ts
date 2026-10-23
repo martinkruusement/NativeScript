@@ -144,12 +144,52 @@ describe('createBootRecorder', () => {
 		// Fast restart before the idle window elapsed:
 		recorder.noteRequest('/__ns_dev__/session');
 		expect(recorder.getRecordedPaths()).toEqual(['/ns/m/src/a', '/ns/m/src/b']);
-		// The new window replaces it once it closes with enough entries.
+		// The new window merges into it once it closes with enough entries.
 		recorder.noteRequest('/ns/m/src/c')?.(200);
 		recorder.noteRequest('/ns/m/src/d')?.(200);
 		recorder.noteRequest('/ns/m/src/e')?.(200);
 		clock.fireIdle();
-		expect(recorder.getRecordedPaths()).toEqual(['/ns/m/src/c', '/ns/m/src/d', '/ns/m/src/e']);
+		expect(recorder.getRecordedPaths()).toEqual(['/ns/m/src/c', '/ns/m/src/d', '/ns/m/src/e', '/ns/m/src/a', '/ns/m/src/b']);
+	});
+
+	it('merges a short boot into the previous recording instead of replacing it', () => {
+		recorder = make({ minEntries: 5 });
+		const deepFiles = Array.from({ length: 40 }, (_, i) => `/ns/m/node_modules/ajv/dist/compile/file-${i}.js`);
+		recorder.noteRequest('/__ns_dev__/session');
+		for (const file of deepFiles) recorder.noteRequest(file)?.(200);
+		clock.fireIdle();
+		expect(recorder.getRecordedPaths()).toEqual(deepFiles);
+
+		// A boot that fails early: three new URLs plus three already recorded.
+		const shortBoot = ['/ns/m/src/main', '/ns/rt', '/ns/core', deepFiles[0], deepFiles[1], deepFiles[2]];
+		recorder.noteRequest('/__ns_dev__/session');
+		for (const url of shortBoot) recorder.noteRequest(url)?.(200);
+		clock.fireIdle();
+		expect(recorder.getRecordedPaths()).toEqual([...shortBoot, ...deepFiles.slice(3)]);
+	});
+
+	it('keeps the previous recording when a later window is below minEntries', () => {
+		recorder.noteRequest('/__ns_dev__/session');
+		recorder.noteRequest('/ns/m/src/a')?.(200);
+		recorder.noteRequest('/ns/m/src/b')?.(200);
+		clock.fireIdle();
+
+		recorder.noteRequest('/__ns_dev__/session');
+		recorder.noteRequest('/ns/m/src/c')?.(200);
+		clock.fireIdle();
+		expect(recorder.getRecordedPaths()).toEqual(['/ns/m/src/a', '/ns/m/src/b']);
+	});
+
+	it('caps the merged recording at maxEntries, dropping the oldest entries', () => {
+		recorder = make({ maxEntries: 5 });
+		recorder.noteRequest('/__ns_dev__/session');
+		for (const name of ['a', 'b', 'c', 'd']) recorder.noteRequest(`/ns/m/src/${name}`)?.(200);
+		clock.fireIdle();
+
+		recorder.noteRequest('/__ns_dev__/session');
+		for (const name of ['e', 'f', 'g']) recorder.noteRequest(`/ns/m/src/${name}`)?.(200);
+		clock.fireIdle();
+		expect(recorder.getRecordedPaths()).toEqual(['/ns/m/src/e', '/ns/m/src/f', '/ns/m/src/g', '/ns/m/src/a', '/ns/m/src/b']);
 	});
 
 	it('caps recordings at maxEntries', () => {
@@ -188,6 +228,26 @@ describe('boot recording persistence', () => {
 
 		const fresh = createBootRecorder({ platform: 'ios', flavor: 'angular', projectRoot, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
 		expect(fresh.getRecordedPaths()).toEqual(['/ns/m/src/main']);
+	});
+
+	it('merges a new window into the recording persisted by a previous run', () => {
+		const clock = createFakeClock();
+		const options = { platform: 'ios', flavor: 'angular', projectRoot, minEntries: 1, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer };
+		const first = createBootRecorder(options);
+		first.noteRequest('/__ns_dev__/session');
+		first.noteRequest('/ns/m/node_modules/ajv/dist/ajv.js')?.(200);
+		first.noteRequest('/ns/m/src/main')?.(200);
+		clock.fireIdle();
+
+		const second = createBootRecorder(options);
+		second.noteRequest('/__ns_dev__/session');
+		second.noteRequest('/ns/m/src/main')?.(200);
+		second.noteRequest('/ns/m/src/broken-page')?.(200);
+		clock.fireIdle();
+
+		const expected = ['/ns/m/src/main', '/ns/m/src/broken-page', '/ns/m/node_modules/ajv/dist/ajv.js'];
+		expect(second.getRecordedPaths()).toEqual(expected);
+		expect(loadPersistedBootRecording(projectRoot, 'ios', 'angular')).toEqual(expected);
 	});
 
 	it('rejects mismatched platform/flavor/version recordings', () => {

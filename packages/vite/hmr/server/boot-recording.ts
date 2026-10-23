@@ -15,14 +15,18 @@ import { getProjectFlavor } from '../../helpers/flavor.js';
 // Lifecycle: a recording session opens when the device fetches the session
 // descriptor (`/__ns_dev__/session` — requested exactly once per boot by the
 // session bootstrap), collects every successfully-served prefetchable
-// request, and closes after an idle window. Closed sessions replace the
-// previous recording and persist to
+// request, and closes after an idle window. Closed sessions are merged into
+// the previous recording and persist to
 // `node_modules/.ns-vite/boot-closure-<platform>-<flavor>.json` so a fresh
 // dev-server start benefits too.
 //
-// Self-healing: only 2xx responses are recorded, so deleted modules (404s)
-// drop out on the next boot. Stale-but-servable entries are harmless — the
-// deps bundle simply carries an unused entry until the next recording.
+// Staleness: only 2xx responses are recorded, and the deps bundle skips
+// recorded files that no longer resolve on disk. A recorded URL stays until
+// the `maxEntries` cap pushes it out (least recently requested first) or the
+// recording file is deleted. Until then, a recorded node_modules file that
+// still resolves stays a deps-bundle entry and evaluates at boot, even after
+// the app stops importing it. If a deps-bundle build with the recording
+// fails, the bundle is rebuilt without it.
 
 export const BOOT_RECORDING_VERSION = 1;
 
@@ -111,7 +115,7 @@ export type BootRecorder = {
 	 * response status code; only 2xx completions are recorded.
 	 */
 	noteRequest(pathWithSearch: string): ((statusCode: number) => void) | null;
-	/** Most recent completed (or persisted) recording; null when none. */
+	/** Union of completed (and persisted) recordings, newest first; null when none. */
 	getRecordedPaths(): string[] | null;
 	/** Force-close the active session (idle close path; exposed for tests). */
 	closeActiveSession(): void;
@@ -163,7 +167,10 @@ export function createBootRecorder(options: BootRecorderOptions): BootRecorder {
 			log(`[hmr-ws][boot-record] discarded window with ${finished.order.length} entries (< ${minEntries})`);
 			return;
 		}
-		best = finished.order.slice(0, maxEntries);
+		// A boot that fails early must not shrink the recording.
+		const merged = new Set(finished.order);
+		for (const recorded of best ?? []) merged.add(recorded);
+		best = Array.from(merged).slice(0, maxEntries);
 		persistBest();
 		log(`[hmr-ws][boot-record] captured ${best.length} boot urls in ${Math.max(0, now() - finished.startedAt)}ms`);
 	};
