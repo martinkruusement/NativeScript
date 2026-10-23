@@ -3,7 +3,7 @@ import { merge } from 'webpack-merge';
 import Config from 'webpack-chain';
 import fs from 'fs';
 
-import { hasDependency } from '../helpers/dependencies';
+import { getDependencyVersion, hasDependency } from '../helpers/dependencies';
 import { getPlatformName } from '../helpers/platform';
 import { env as _env, IWebpackEnv } from '../index';
 import { error } from '../helpers/log';
@@ -13,9 +13,13 @@ export default function (config: Config, env: IWebpackEnv = _env): Config {
 	base(config, env);
 
 	const platform = getPlatformName();
+	const useVueLoader16Config = shouldUseVueLoader16Config();
+	const stylePostLoaderPath = useVueLoader16Config
+		? 'vue-loader/dist/stylePostLoader.js'
+		: 'vue-loader/lib/loaders/stylePostLoader.js';
 
-	// we need to patch VueLoader if we want to enable hmr
-	if (env.hmr) {
+	// vue-loader 15 needs a source patch to enable hmr
+	if (env.hmr && !useVueLoader16Config) {
 		patchVueLoaderForHMR();
 	}
 
@@ -30,6 +34,14 @@ export default function (config: Config, env: IWebpackEnv = _env): Config {
 		.use('vue-loader')
 		.loader('vue-loader')
 		.tap((options) => {
+			// target node makes vue-loader 16+ emit SSR code without HMR
+			if (useVueLoader16Config) {
+				return {
+					...options,
+					isServerBuild: false,
+				};
+			}
+
 			return {
 				...options,
 				compiler: getTemplateCompiler(),
@@ -43,13 +55,13 @@ export default function (config: Config, env: IWebpackEnv = _env): Config {
 		.rule('css')
 		.use('vue-css-loader')
 		.after('css2json-loader')
-		.loader('vue-loader/lib/loaders/stylePostLoader.js');
+		.loader(stylePostLoaderPath);
 
 	config.module
 		.rule('scss')
 		.use('vue-css-loader')
 		.after('css2json-loader')
-		.loader('vue-loader/lib/loaders/stylePostLoader.js');
+		.loader(stylePostLoaderPath);
 
 	// set up ts support in vue files
 	config.module
@@ -110,7 +122,7 @@ function patchVueLoaderForHMR() {
 		const source = fs.readFileSync(vueLoaderPath).toString();
 		const patchedSource = source.replace(
 			/(isServer\s=\s)(target\s===\s'node')/g,
-			'$1false;'
+			'$1false;',
 		);
 		fs.writeFileSync(vueLoaderPath, patchedSource);
 		delete require.cache[vueLoaderPath];
@@ -125,4 +137,29 @@ function getTemplateCompiler() {
 	} catch (err) {
 		// ignore
 	}
+}
+
+function shouldUseVueLoader16Config(): boolean {
+	// the project's copy first, since Vue 2 apps install vue-loader 15 there
+	const vueLoaderVersion: string =
+		getDependencyVersion('vue-loader') ??
+		require('vue-loader/package.json').version;
+
+	if (parseInt(vueLoaderVersion, 10) < 16) {
+		return false;
+	}
+
+	// vue-loader 16+ cannot compile Vue 2, keep the vue-loader 15 config
+	const nativescriptVueVersion = getDependencyVersion('nativescript-vue');
+	if (nativescriptVueVersion && parseInt(nativescriptVueVersion, 10) < 3) {
+		error(`
+			nativescript-vue ${nativescriptVueVersion} needs vue-loader 15, but vue-loader ${vueLoaderVersion} was found.
+			Install vue-loader 15 and configure it in webpack.config.js as described in
+			https://github.com/NativeScript/NativeScript/issues/11009
+		`);
+
+		return false;
+	}
+
+	return true;
 }

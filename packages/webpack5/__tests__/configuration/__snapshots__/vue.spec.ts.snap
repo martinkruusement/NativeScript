@@ -168,7 +168,7 @@ exports[`vue configuration for android 1`] = `
           },
           /* config.module.rule('css').use('vue-css-loader') */
           {
-            loader: 'vue-loader/lib/loaders/stylePostLoader.js'
+            loader: 'vue-loader/dist/stylePostLoader.js'
           },
           /* config.module.rule('css').use('postcss-loader') */
           {
@@ -202,7 +202,7 @@ exports[`vue configuration for android 1`] = `
           },
           /* config.module.rule('scss').use('vue-css-loader') */
           {
-            loader: 'vue-loader/lib/loaders/stylePostLoader.js'
+            loader: 'vue-loader/dist/stylePostLoader.js'
           },
           /* config.module.rule('scss').use('postcss-loader') */
           {
@@ -239,7 +239,7 @@ exports[`vue configuration for android 1`] = `
           {
             loader: 'vue-loader',
             options: {
-              compiler: undefined
+              isServerBuild: false
             }
           }
         ]
@@ -560,7 +560,7 @@ exports[`vue configuration for ios 1`] = `
           },
           /* config.module.rule('css').use('vue-css-loader') */
           {
-            loader: 'vue-loader/lib/loaders/stylePostLoader.js'
+            loader: 'vue-loader/dist/stylePostLoader.js'
           },
           /* config.module.rule('css').use('postcss-loader') */
           {
@@ -594,7 +594,7 @@ exports[`vue configuration for ios 1`] = `
           },
           /* config.module.rule('scss').use('vue-css-loader') */
           {
-            loader: 'vue-loader/lib/loaders/stylePostLoader.js'
+            loader: 'vue-loader/dist/stylePostLoader.js'
           },
           /* config.module.rule('scss').use('postcss-loader') */
           {
@@ -631,7 +631,7 @@ exports[`vue configuration for ios 1`] = `
           {
             loader: 'vue-loader',
             options: {
-              compiler: undefined
+              isServerBuild: false
             }
           }
         ]
