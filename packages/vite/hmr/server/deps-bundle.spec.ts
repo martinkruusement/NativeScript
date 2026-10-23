@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { setUserDefineEntries } from '../../helpers/global-defines.js';
-import { DEPS_BUNDLE_PATH, buildDepsBundleEntryCode, buildDepsCandidateSpecs, buildDepsShimCode, buildDepsVendorRuntimeModule, collectDepsModuleExportInfo, computeDepsBundleCacheKey, createDepsBundleService, depsRegistryKeyForFile, generateDepsBundle, isDepsPerModuleServingEnabled, resolveDepsEntriesFromRecording, resolveDepsEntriesFromVendorCollection } from './deps-bundle.js';
+import { DEPS_BUNDLE_PATH, buildDepsBundleEntryCode, buildDepsCandidateSpecs, buildDepsShimCode, buildDepsVendorRuntimeModule, collectDepsModuleExportInfo, computeDepsBundleCacheKey, createDepsBundleService, depsRegistryKeyForFile, generateDepsBundle, isDepsPerModuleServingEnabled, patchedDependenciesFingerprint, resolveDepsEntriesFromRecording, resolveDepsEntriesFromVendorCollection } from './deps-bundle.js';
 import { registerFrameworkFlavor } from '../framework-flavors.js';
 import { typescriptServerStrategy } from '../frameworks/typescript/server/strategy.js';
 
@@ -100,6 +100,137 @@ describe('computeDepsBundleCacheKey', () => {
 		const key = computeDepsBundleCacheKey(base);
 		expect(computeDepsBundleCacheKey({ ...base, entryKeys: ['node_modules/pkg-b/index.js'] })).not.toBe(key);
 		expect(computeDepsBundleCacheKey({ ...base, lockfile: 'package-lock.json:2:100' })).not.toBe(key);
+	});
+
+	it('changes when the patches fingerprint changes', () => {
+		const key = computeDepsBundleCacheKey({ ...base, patches: '/proj/patches/pkg-a+1.0.0.patch:1:10' });
+		expect(computeDepsBundleCacheKey({ ...base, patches: '/proj/patches/pkg-a+1.0.0.patch:2:10' })).not.toBe(key);
+		expect(computeDepsBundleCacheKey(base)).not.toBe(key);
+	});
+
+	it('treats an omitted patches fingerprint as no patches', () => {
+		expect(computeDepsBundleCacheKey(base)).toBe(computeDepsBundleCacheKey({ ...base, patches: 'none' }));
+	});
+});
+
+describe('patchedDependenciesFingerprint', () => {
+	const roots: string[] = [];
+	afterAll(() => roots.forEach((root) => rmSync(root, { recursive: true, force: true })));
+
+	const createRoot = (manifest: string | object | null, files: Record<string, string> = {}): string => {
+		const root = mkdtempSync(path.join(realpathSync(tmpdir()), 'ns-deps-patches-'));
+		roots.push(root);
+		if (manifest !== null) {
+			writeFileSync(path.join(root, 'package.json'), typeof manifest === 'string' ? manifest : JSON.stringify(manifest));
+		}
+		for (const [rel, contents] of Object.entries(files)) {
+			mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+			writeFileSync(path.join(root, rel), contents);
+		}
+		return root;
+	};
+
+	it('is none without declared patches or patch-package patches', () => {
+		expect(patchedDependenciesFingerprint(createRoot({ name: 'app' }), null)).toBe('none');
+		expect(patchedDependenciesFingerprint(createRoot({ name: 'app', patchedDependencies: {} }, { 'patches/README.md': 'notes' }), null)).toBe('none');
+		expect(patchedDependenciesFingerprint(createRoot(null), null)).toBe('none');
+		expect(patchedDependenciesFingerprint(createRoot('{ not json'), null)).toBe('none');
+	});
+
+	it('stamps a declared patch file and changes when it is edited', () => {
+		const root = createRoot({ patchedDependencies: { 'pkg-a@1.0.0': 'vendor-patches/pkg-a.patch' } }, { 'vendor-patches/pkg-a.patch': 'one' });
+		const patchFile = path.join(root, 'vendor-patches', 'pkg-a.patch');
+		const first = patchedDependenciesFingerprint(root, null);
+		expect(first).toContain(`pkg-a@1.0.0=${patchFile}:`);
+		expect(first).not.toContain(':missing');
+		expect(patchedDependenciesFingerprint(root, null)).toBe(first);
+
+		writeFileSync(patchFile, 'one more');
+		const resized = patchedDependenciesFingerprint(root, null);
+		expect(resized).not.toBe(first);
+
+		// Same size, new mtime.
+		utimesSync(patchFile, new Date(2000, 0, 1), new Date(2000, 0, 1));
+		expect(patchedDependenciesFingerprint(root, null)).not.toBe(resized);
+	});
+
+	it('reports a declared patch whose file is missing', () => {
+		const root = createRoot({ patchedDependencies: { 'pkg-a@1.0.0': 'patches/pkg-a@1.0.0.patch' } });
+		const missing = patchedDependenciesFingerprint(root, null);
+		expect(missing).toBe(`pkg-a@1.0.0=${path.join(root, 'patches', 'pkg-a@1.0.0.patch')}:missing`);
+
+		mkdirSync(path.join(root, 'patches'));
+		writeFileSync(path.join(root, 'patches', 'pkg-a@1.0.0.patch'), 'one');
+		expect(patchedDependenciesFingerprint(root, null)).not.toBe(missing);
+	});
+
+	it('merges pnpm.patchedDependencies, letting patchedDependencies win for the same package', () => {
+		const root = createRoot(
+			{
+				pnpm: { patchedDependencies: { 'pkg-a@1.0.0': 'pnpm-patches/pkg-a.patch', 'pkg-b@1.0.0': 'pnpm-patches/pkg-b.patch' } },
+				patchedDependencies: { 'pkg-b@1.0.0': 'bun-patches/pkg-b.patch' },
+			},
+			{ 'pnpm-patches/pkg-a.patch': 'a', 'pnpm-patches/pkg-b.patch': 'b', 'bun-patches/pkg-b.patch': 'b' },
+		);
+		const fingerprint = patchedDependenciesFingerprint(root, null);
+		expect(fingerprint).toContain(`pkg-a@1.0.0=${path.join(root, 'pnpm-patches', 'pkg-a.patch')}:`);
+		expect(fingerprint).toContain(`pkg-b@1.0.0=${path.join(root, 'bun-patches', 'pkg-b.patch')}:`);
+		expect(fingerprint).not.toContain(path.join(root, 'pnpm-patches', 'pkg-b.patch'));
+	});
+
+	it('stamps patch-package patches and ignores other files in the patches directory', () => {
+		const root = createRoot({ name: 'app' }, { 'patches/README.md': 'notes', 'patches/pkg-a+1.0.0.patch': 'one' });
+		const first = patchedDependenciesFingerprint(root, null);
+		expect(first).toContain(path.join(root, 'patches', 'pkg-a+1.0.0.patch'));
+		expect(first).not.toContain('README.md');
+
+		writeFileSync(path.join(root, 'patches', 'README.md'), 'more notes');
+		expect(patchedDependenciesFingerprint(root, null)).toBe(first);
+
+		writeFileSync(path.join(root, 'patches', '@scope+pkg-b+2.0.0.patch'), 'two');
+		const added = patchedDependenciesFingerprint(root, null);
+		expect(added).not.toBe(first);
+		expect(added).toContain(path.join(root, 'patches', '@scope+pkg-b+2.0.0.patch'));
+
+		writeFileSync(path.join(root, 'patches', 'pkg-a+1.0.0.patch'), 'one edited');
+		const edited = patchedDependenciesFingerprint(root, null);
+		expect(edited).not.toBe(added);
+
+		rmSync(path.join(root, 'patches', 'pkg-a+1.0.0.patch'));
+		expect(patchedDependenciesFingerprint(root, null)).not.toBe(edited);
+	});
+
+	it('also stamps the workspace root, once when it is the app root', () => {
+		const workspaceRoot = createRoot({ workspaces: ['app'], patchedDependencies: { 'pkg-a@1.0.0': 'bun-patches/pkg-a.patch' } }, { 'bun-patches/pkg-a.patch': 'a', 'patches/pkg-b+1.0.0.patch': 'b', 'app/package.json': '{}' });
+		const projectRoot = path.join(workspaceRoot, 'app');
+		expect(patchedDependenciesFingerprint(projectRoot, null)).toBe('none');
+
+		const first = patchedDependenciesFingerprint(projectRoot, workspaceRoot);
+		expect(first).toContain(`pkg-a@1.0.0=${path.join(workspaceRoot, 'bun-patches', 'pkg-a.patch')}:`);
+		expect(first).toContain(path.join(workspaceRoot, 'patches', 'pkg-b+1.0.0.patch'));
+
+		writeFileSync(path.join(workspaceRoot, 'bun-patches', 'pkg-a.patch'), 'a edited');
+		expect(patchedDependenciesFingerprint(projectRoot, workspaceRoot)).not.toBe(first);
+
+		expect(patchedDependenciesFingerprint(workspaceRoot, `${workspaceRoot}${path.sep}`)).toBe(patchedDependenciesFingerprint(workspaceRoot, null));
+	});
+
+	it('never throws on malformed manifests or a patches file in place of the directory', () => {
+		const root = createRoot({ patchedDependencies: ['pkg-a.patch'], pnpm: { patchedDependencies: null } }, { patches: 'not a directory' });
+		expect(() => patchedDependenciesFingerprint(root, null)).not.toThrow();
+		expect(patchedDependenciesFingerprint(root, null)).toBe(patchedDependenciesFingerprint(root, null));
+
+		const unstringable = createRoot({ patchedDependencies: { 'pkg-a@1.0.0': { toString: 1 } } });
+		expect(() => patchedDependenciesFingerprint(unstringable, null)).not.toThrow();
+		expect(patchedDependenciesFingerprint(unstringable, null)).toBe('none');
+	});
+
+	it('still stamps patch-package patches when package.json is missing or invalid', () => {
+		for (const manifest of [null, '{ not json']) {
+			const root = createRoot(manifest, { 'patches/pkg-a+1.0.0.patch': 'one' });
+			const patchFile = path.join(root, 'patches', 'pkg-a+1.0.0.patch');
+			expect(patchedDependenciesFingerprint(root, null)).toBe(`${patchFile}:${statSync(patchFile).mtimeMs}:3`);
+		}
 	});
 });
 
@@ -386,6 +517,53 @@ describe('generateDepsBundle', () => {
 		expect(second!.hash).toBe(first!.hash);
 		expect(second!.code).toBe(first!.code);
 		expect(second!.keys).toEqual(first!.keys);
+	});
+
+	it('rebuilds instead of loading the disk cache when a patch-package patch changes', async () => {
+		const root = createFixtureProject();
+		try {
+			const helper = path.join(root, 'node_modules', 'pkg-a', 'helper.js');
+			const patchFile = path.join(root, 'patches', 'pkg-a+1.0.0.patch');
+			const build = () => generateDepsBundle({ projectRoot: root, platform: 'ios', mode: 'development', flavor: 'typescript', recordedPaths: ['/ns/m/node_modules/pkg-a/index.js'] });
+			writeFileSync(helper, `export const helper = 'helper-v1';\n`);
+			expect((await build())!.code).toContain('helper-v1');
+
+			// patch-package rewrites the installed file and records the patch.
+			writeFileSync(helper, `export const helper = 'helper-v2';\n`);
+			mkdirSync(path.dirname(patchFile));
+			writeFileSync(patchFile, 'v2');
+			expect((await build())!.code).toContain('helper-v2');
+
+			writeFileSync(helper, `export const helper = 'helper-v3';\n`);
+			writeFileSync(patchFile, 'v3 edit');
+			expect((await build())!.code).toContain('helper-v3');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it('rebuilds instead of loading the disk cache when a patch declared by the workspace root changes', async () => {
+		const workspaceRoot = mkdtempSync(path.join(realpathSync(tmpdir()), 'ns-deps-workspace-'));
+		try {
+			const write = (rel: string, contents: string) => {
+				const abs = path.join(workspaceRoot, rel);
+				mkdirSync(path.dirname(abs), { recursive: true });
+				writeFileSync(abs, contents);
+			};
+			write('package.json', JSON.stringify({ name: 'workspace', private: true, workspaces: ['app'], patchedDependencies: { 'pkg-a@1.0.0': 'bun-patches/pkg-a@1.0.0.patch' } }));
+			write('bun-patches/pkg-a@1.0.0.patch', 'v1');
+			write('app/package.json', JSON.stringify({ name: 'fixture-app', version: '1.0.0' }));
+			write('app/node_modules/pkg-a/package.json', JSON.stringify({ name: 'pkg-a', version: '1.0.0', module: 'index.js' }));
+			write('app/node_modules/pkg-a/index.js', `export const A = 'pkg-a-v1';\n`);
+			const build = () => generateDepsBundle({ projectRoot: path.join(workspaceRoot, 'app'), platform: 'ios', mode: 'development', flavor: 'typescript', recordedPaths: ['/ns/m/node_modules/pkg-a/index.js'] });
+			expect((await build())!.code).toContain('pkg-a-v1');
+
+			write('app/node_modules/pkg-a/index.js', `export const A = 'pkg-a-v2';\n`);
+			write('bun-patches/pkg-a@1.0.0.patch', 'v2 edit');
+			expect((await build())!.code).toContain('pkg-a-v2');
+		} finally {
+			rmSync(workspaceRoot, { recursive: true, force: true });
+		}
 	});
 
 	it('evaluates transitive files on first use, so a guarded require of a throwing module stays guarded', async () => {

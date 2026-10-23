@@ -540,9 +540,9 @@ export interface GenerateDepsBundleOptions {
 
 // ============================================================================
 // Disk cache — same shape as the core bundle cache (node_modules/.ns-vite).
-// The key covers the lockfile (dependency identity), the full entry set
-// (recorded + vendor-seeded), defines, and the vite package version. Opt out
-// with `NS_DEPS_BUNDLE_NO_DISK_CACHE=1`.
+// The key covers the lockfile (dependency identity), dependency patches, the
+// full entry set (recorded + vendor-seeded), defines, and the vite package
+// version. Opt out with `NS_DEPS_BUNDLE_NO_DISK_CACHE=1`.
 // ============================================================================
 
 const DEPS_BUNDLE_DISK_CACHE_SCHEMA = 4;
@@ -563,7 +563,50 @@ function lockfileFingerprint(projectRoot: string): string {
 	return 'none';
 }
 
-export function computeDepsBundleCacheKey(input: { platform: string; mode: string; flavor: string; defines: Record<string, string>; entryKeys: readonly string[]; lockfile: string; vitePackageVersion: string }): string {
+function patchFileStamp(file: string): string {
+	try {
+		const st = statSync(file);
+		return `${file}:${st.mtimeMs}:${st.size}`;
+	} catch {
+		return `${file}:missing`;
+	}
+}
+
+function collectPatchStamps(root: string): string[] {
+	const stamps: string[] = [];
+	try {
+		const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf-8'));
+		const declared = { ...(pkg?.pnpm?.patchedDependencies || {}), ...(pkg?.patchedDependencies || {}) };
+		for (const name of Object.keys(declared).sort()) {
+			stamps.push(`${name}=${patchFileStamp(path.resolve(root, String(declared[name])))}`);
+		}
+	} catch {}
+	try {
+		// patch-package's default directory; its patches are not declared anywhere.
+		const dir = path.join(root, 'patches');
+		const names = readdirSync(dir)
+			.filter((name) => name.endsWith('.patch'))
+			.sort();
+		for (const name of names) {
+			stamps.push(patchFileStamp(path.join(dir, name)));
+		}
+	} catch {}
+	return stamps;
+}
+
+/**
+ * Fingerprints the patch files that change installed dependencies without changing the lockfile: `patchedDependencies` and `pnpm.patchedDependencies` entries plus patch-package's `patches/*.patch`, of the app and the workspace root, by mtime and size.
+ * @param projectRoot app root
+ * @param workspaceRoot monorepo workspace root, or null outside a monorepo
+ * @returns a stable fingerprint, `none` when there are no patches
+ */
+export function patchedDependenciesFingerprint(projectRoot: string, workspaceRoot: string | null): string {
+	const roots = [projectRoot, ...(workspaceRoot && path.resolve(workspaceRoot) !== path.resolve(projectRoot) ? [workspaceRoot] : [])];
+	const stamps = roots.flatMap((root) => collectPatchStamps(root));
+	return stamps.length ? stamps.join('|') : 'none';
+}
+
+export function computeDepsBundleCacheKey(input: { platform: string; mode: string; flavor: string; defines: Record<string, string>; entryKeys: readonly string[]; lockfile: string; patches?: string; vitePackageVersion: string }): string {
 	const payload = JSON.stringify({
 		schema: DEPS_BUNDLE_DISK_CACHE_SCHEMA,
 		platform: input.platform,
@@ -572,6 +615,7 @@ export function computeDepsBundleCacheKey(input: { platform: string; mode: strin
 		defines: input.defines,
 		entryKeys: input.entryKeys,
 		lockfile: input.lockfile,
+		patches: input.patches ?? 'none',
 		vitePackageVersion: input.vitePackageVersion,
 	});
 	return createHash('sha1').update(payload).digest('hex');
@@ -715,6 +759,7 @@ export async function generateDepsBundle(options: GenerateDepsBundleOptions): Pr
 			defines,
 			entryKeys: entries.map((e) => e.key).sort(),
 			lockfile: lockfileFingerprint(projectRoot),
+			patches: patchedDependenciesFingerprint(projectRoot, workspaceRoot),
 			vitePackageVersion: getVitePackageVersion(),
 		});
 		const cached = tryLoadDepsBundleFromDisk(projectRoot, String(platform), cacheKey);
